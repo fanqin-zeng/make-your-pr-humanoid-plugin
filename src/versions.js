@@ -56,7 +56,7 @@ async function load(repository, target, source, version) {
 async function blobId(repository, object, file) {
     if (!file) return null;
     const entry = await git(repository, ["ls-tree", "-z", object, "--", ":(literal)" + file]);
-    return entry.match(/^(?:100644|100755) blob ([a-f0-9]+)\t/)?.[1] || null;
+    return entry.match(/^\d{6} blob ([a-f0-9]+)\t/)?.[1] || null;
 }
 
 function shiftRange(diff, start, end) {

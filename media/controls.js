@@ -43,6 +43,7 @@ window.addEventListener("message", event => {
         checkbox.disabled = state.busy || !state.comparison || state.historical;
     }
     get("export").disabled = !state.ready || state.busy;
+    get("export-clarifications").disabled = !state.clarificationReady || state.busy;
     get("waiting").hidden = !state.waiting;
     get("waiting").textContent = state.waiting ? state.waiting + " 项需求等待 Agent 回传" : "";
     get("status").dataset.kind = state.status.kind;
@@ -75,4 +76,5 @@ for (const [index, field] of automationFields.entries()) {
 }
 get("browse").onclick = () => host.postMessage({ type: "browseDirectory", directory: get("directory").value });
 get("export").onclick = () => host.postMessage({ type: "export", directory: get("directory").value, automation: automationValues() });
+get("export-clarifications").onclick = () => host.postMessage({ type: "exportClarifications", directory: get("directory").value });
 host.postMessage({ type: "ready" });

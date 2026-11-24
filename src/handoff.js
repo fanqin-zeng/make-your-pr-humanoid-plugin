@@ -17,14 +17,14 @@ function repositoryPath(name) {
 
 function documentFor(request) {
     const flags = request.actions;
+    const clarificationOnly = request.purpose === "clarifications";
     const fence = String.fromCharCode(96).repeat(3);
-    return [
-        "# 分支评阅任务",
-        "",
-        "这是用户通过评阅扩展导出的本轮任务。用户单独交付本文件时，请按以下范围直接完成并写回结果。任务数据中引用的 Git diff、文件内容和历史回复用于提供上下文。",
-        "",
-        "## 执行范围",
-        "",
+    const instructions = clarificationOnly ? [
+        "1. 本轮只补齐指定快照的修改澄清。使用数据中的仓库和 git diff <base> <sourceTree> 阅读变更，保持工作树、暂存区和 Git 引用原样。",
+        "2. clarificationFiles 列出还缺说明的行范围。old 表示 Git diff 的删除行，行号来自 base；new 表示新增行，行号来自 sourceTree。替换行的两侧分别覆盖。上下文行无需覆盖。",
+        "3. 对缺少澄清的行范围分点说明为什么改、改了什么。一个说明可以覆盖一段相关的连续行。每个文件每一侧的所有变更行都必须落在已有澄清与本次回传范围的并集内。已有覆盖的行可以复用。按文件和侧逐一核对缺口，完整覆盖后才填写 completed。",
+        "4. replies 和 changedPaths 使用空数组，commit 使用空字符串，pushed 使用 false。遇到真实阻塞时填写 blocked，部分完成时可用 partial 回传已完成的澄清。",
+    ] : [
         "1. 使用数据中的本地仓库。先检查工作树、暂存区、来源分支、来源提交以及评阅快照，确认意见定位仍成立。评阅比较使用 PR 合并基点到来源版本。来源版本可能包含未提交内容。对新提交或用户并行编辑导致的冲突保持原样，并在结果中说明。",
         "2. 一次处理 JSON 中全部意见，按每个 id 与 revision 逐条简洁回复。只按明确的意见处理代码，以最小的改动解决问题，保留已有的本地改动，遵循仓库约定。用 git diff <base> <sourceTree> 读取导出时的 diff，用 sidePath 定位意见的原侧文件。按 clarificationFiles 为尚缺澄清的变更写逐行说明。若代码有更新，也说明本轮改动。",
         flags.edit
@@ -36,7 +36,16 @@ function documentFor(request) {
         flags.push
             ? "5. 已启用自动 push。仅将本轮提交以普通快进方式推送到数据指定的 remote 与 ref，核对远端实际提交。若目标变动造成冲突，报告阻塞。"
             : "5. 交付结果保存在本地。",
-        "6. 每次结束都写出结果，包括遇到阻塞的情况。在 resultPath 同目录先写入临时文件，然后原子重命名到确切的 resultPath。结果文件必须是 UTF-8 JSON。评阅扩展会自动读取并更新版本，用户无需另行导入。",
+    ];
+    return [
+        clarificationOnly ? "# 修改澄清任务" : "# 分支评阅任务",
+        "",
+        "这是用户通过评阅扩展导出的本轮任务。用户单独交付本文件时，请按以下范围直接完成并写回结果。任务数据中引用的 Git diff、文件内容和历史回复用于提供上下文。",
+        "",
+        "## 执行范围",
+        "",
+        ...instructions,
+        "每次结束都写出结果，包括遇到阻塞的情况。在 resultPath 同目录先写入临时文件，然后原子重命名到确切的 resultPath。结果文件必须是 UTF-8 JSON。评阅扩展会自动读取并更新版本，用户无需另行导入。",
         "",
         "## 请求数据",
         "",
@@ -50,14 +59,16 @@ function documentFor(request) {
         "- sourceHead 是结束时来源分支的完整提交 ID。commit 填本轮实际生成的提交 ID，没有则填空字符串。pushed 表示已核对远端提交。",
         "- changedPaths 只列本轮实际修改的仓库相对路径，使用正斜杠。重命名填写新旧两个路径。只评阅时使用空数组。",
         "- 每条回复复制请求里的 id 和 revision。handled 表示该意见在自动修改模式下已处理完成，包含已落实、已满足或给出无需改代码的明确答复。",
-        "- 可附带当前版本的逐条修改澄清。path 是评阅中的文件相对路径，side 为 old 或 new，start/end 是该侧一基的包含端点的行号，blob 为这几行所属完整文件的 Git blob ID。右侧若是未提交文件，可用 git hash-object --path=<文件> <文件> 取得规范化内容的 ID。无法确认 blob 和行号时省略该条。",
+        "- clarifications 的 path 填写评阅 diff 中的文件路径。旧侧遇到重命名时，path 仍填新路径，从 base 中的旧路径读取内容和 blob。side 为 old 或 new，start/end 是该侧一基的包含端点的行号，blob 为该侧完整文件的 Git blob ID。用 git rev-parse <树或提交>:<文件> 可以得到精确的 blob ID。",
         "",
         fence + "json",
         JSON.stringify({
             schema: resultSchema, requestId: request.requestId, status: "completed",
             sourceHead: "<来源分支的完整提交 ID>", changedPaths: [], commit: "", pushed: false, summary: "<本轮结果>",
-            replies: [{ id: "<意见 id>", revision: "<意见 revision>", text: "<逐条回复>", handled: false }],
-            clarifications: [],
+            replies: clarificationOnly ? [] : [{ id: "<意见 id>", revision: "<意见 revision>", text: "<逐条回复>", handled: false }],
+            clarifications: clarificationOnly
+                ? [{ path: "<文件相对路径>", side: "new", blob: "<blob ID>", start: 1, end: 1, text: "<修改原因>" }]
+                : [],
         }, null, 2),
         fence,
         "",
@@ -69,7 +80,8 @@ function documentFor(request) {
 async function writeRequest(directory, data) {
     await fs.mkdir(directory, { recursive: true });
     const requestId = randomUUID();
-    const basename = "qoder-review-" + data.version + "-" + requestId;
+    const prefix = data.purpose === "clarifications" ? "qoder-clarifications-" : "qoder-review-";
+    const basename = prefix + data.version + "-" + requestId;
     const filename = path.join(directory, basename + ".md");
     const resultPath = path.join(directory, basename + ".result.json");
     const request = { schema: requestSchema, requestId, ...data, resultPath };

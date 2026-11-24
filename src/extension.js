@@ -8,6 +8,7 @@ const git = require("./git");
 const handoff = require("./handoff");
 const changes = require("./changes");
 const versions = require("./versions");
+const { uncoveredFiles, mergePoints } = require("./clarifications");
 
 const id = "workspacePrReview";
 const scheme = "workspace-pr-review";
@@ -118,6 +119,7 @@ class Review {
             })).reverse(),
             version: this.record?.number, historical: Boolean(this.record && !this.isLatest),
             status: this.status, ready: this.isLatest && Boolean(this.snapshot?.files.length || this.record?.opinions.length),
+            clarificationReady: this.isLatest && this.snapshot.files.some(file => file.rows.length),
             directory: this.snapshot ? this.context.workspaceState.get(directoryKey, this.requestDirectory()) : "",
             waiting: Object.values(this.exports.pending).filter(job => job.storeKey === this.storeKey).length,
             automation: changes.automation(this.data?.automation),
@@ -497,10 +499,11 @@ class Review {
         this.notify();
     }
 
-    async exportRequest(input, requested) {
+    async exportRequest(input, requested, purpose = "review") {
         if (!this.isLatest || this.busy) return;
         const { repository, source, target, sourceCommit, head, base, targetCommit } = this.snapshot;
-        const actions = changes.automation(requested);
+        const clarificationOnly = purpose === "clarifications";
+        const actions = changes.automation(clarificationOnly ? undefined : requested);
         const version = this.record.number;
         const storageId = comparisonId(repository, target, source);
         this.exporting = true;
@@ -513,34 +516,51 @@ class Review {
             }
             if (actions.edit) await changes.assertHead(repository, source, sourceCommit);
             const pushDestination = actions.push ? await changes.pushDestination(repository, source) : null;
-            const opinions = this.record.opinions.filter(note => this.needsReply(note, actions.edit)).map(note => {
+            const pendingOpinions = clarificationOnly ? [] : this.record.opinions.filter(note => this.needsReply(note, actions.edit));
+            const opinions = pendingOpinions.map(note => {
                 const { id, revision, path, side, start, end, text, excerpt } = note;
                 const file = this.fileFor(note);
                 return { id, revision, path, sidePath: side === "old" ? file?.oldPath || path : path,
                     side, start, end, text, excerpt, previousReply: note.replies.at(-1)?.text };
             });
-            const clarificationFiles = this.snapshot.files
-                .filter(file => file.status !== "U" && this.record.clarifications[file.id]?.digest !== file.digest)
-                .map(({ path, oldPath, status, digest }) => ({ path, oldPath, status, digest }));
+            const clarificationFiles = clarificationOnly
+                ? uncoveredFiles(this.snapshot.files, this.record.clarifications)
+                : this.snapshot.files
+                    .filter(file => file.status !== "U" && this.record.clarifications[file.id]?.digest !== file.digest)
+                    .map(({ path, oldPath, status, digest }) => ({ path, oldPath, status, digest }));
+            if (clarificationOnly && !clarificationFiles.length) {
+                void vscode.window.showInformationMessage("当前版本没有待澄清的文本变更行。");
+                return;
+            }
             if (!opinions.length && !clarificationFiles.length) throw new Error("没有待回复的意见或待澄清的文件。");
             const directory = this.requestDirectory(input);
             const job = await handoff.writeRequest(directory, {
-                version, repository, target, source, targetCommit, base, sourceHead: sourceCommit,
+                purpose, version, repository, target, source, targetCommit, base, sourceHead: sourceCommit,
                 sourceTree: head, actions, pushDestination, opinions, clarificationFiles,
             });
             await this.exports.add({ ...job, storeKey: this.storeKey, storageId });
-            this.data.automation = actions;
+            if (!clarificationOnly) this.data.automation = actions;
             await this.context.workspaceState.update(directoryKey, directory);
             await this.save();
-            this.status = { kind: "success", text: "已导出 " + version + " · " + opinions.length + " 条意见" };
-            void vscode.window.showInformationMessage("需求已导出，请把 Markdown 文档交给你的 Agent。", "打开需求文档")
-                .then(choice => {
-                    if (choice) void this.guard(async () => vscode.window.showTextDocument(vscode.Uri.file(job.filename)));
-                });
+            const exported = clarificationOnly ? clarificationFiles.length + " 个文件待澄清" : opinions.length + " 条意见";
+            this.status = { kind: "success", text: "已导出 " + version + " · " + exported };
+            void this.showExportActions(job.filename);
             return job;
         } finally {
             this.exporting = false;
             this.notify();
+        }
+    }
+
+    async showExportActions(filename) {
+        const choice = await vscode.window.showInformationMessage(
+            "需求已导出，请把 Markdown 文档交给你的 Agent。", "打开文件夹", "复制文件目录",
+        );
+        if (choice === "打开文件夹") {
+            await this.guard(() => vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(filename)));
+        }
+        if (choice === "复制文件目录") {
+            await this.guard(() => vscode.env.clipboard.writeText(path.dirname(filename)));
         }
     }
 
@@ -550,6 +570,7 @@ class Review {
         try {
             const { request, storeKey, storageId } = job;
             const { repository, source, target } = request;
+            const clarificationOnly = request.purpose === "clarifications";
             const active = storeKey === this.storeKey && Boolean(this.data);
             const data = structuredClone(active ? this.data : this.context.workspaceState.get(storeKey));
             if (data?.receipts?.[request.requestId]) return true;
@@ -583,10 +604,16 @@ class Review {
                 }
             }
             const { version, snapshot } = await versions.refresh(repository, target, source, data, storageId);
+            if (clarificationOnly && (result.status !== "blocked" || result.clarifications.length)
+                && (snapshot.base !== request.base || snapshot.head !== request.sourceTree
+                    || snapshot.sourceCommit !== request.sourceHead)) {
+                throw new Error("导出时的快照已变化。请刷新比较并重新导出修改澄清需求。");
+            }
             const clarifications = new Map();
+            const filesByPath = new Map(snapshot.files.map(file => [file.path, file]));
             const cachedBlobs = new Map();
             for (const point of result.clarifications) {
-                const file = snapshot.files.find(item => item.path === point.path);
+                const file = filesByPath.get(point.path);
                 if (!file) continue;
                 const name = point.side === "old" ? file.oldPath || file.path : file.path;
                 const object = point.side === "old" ? snapshot.base : snapshot.head;
@@ -602,11 +629,28 @@ class Review {
                 const { side, start, end, text } = point;
                 clarifications.get(file.id).points.push({ side, start, end, text });
             }
-            for (const [fileId, value] of clarifications) version.clarifications[fileId] = value;
+            for (const [fileId, value] of clarifications) {
+                const previous = version.clarifications[fileId];
+                if (clarificationOnly && previous?.digest === value.digest) {
+                    value.points = mergePoints(previous.points, value.points);
+                }
+                version.clarifications[fileId] = value;
+            }
+            if (clarificationOnly && result.status === "completed") {
+                const missing = uncoveredFiles(snapshot.files, version.clarifications);
+                if (missing.length) {
+                    const [{ side, start, end }] = missing[0].ranges;
+                    const line = start === end ? "L" + start : "L" + start + "–" + end;
+                    throw new Error("还有 " + missing.length + " 个文件的变更行缺少澄清。"
+                        + missing[0].path + " " + (side === "old" ? "旧侧 " : "新侧 ") + line
+                        + "。补齐后重新保存回传文件。");
+                }
+            }
             (data.receipts ||= {})[request.requestId] = { version: version.number, status: result.status, summary: result.summary, at };
             await this.context.workspaceState.update(storeKey, data);
             const success = result.status === "completed";
-            const message = (success ? "评阅完成 · " : result.status === "partial" ? "评阅部分完成 · " : "评阅受阻 · ")
+            const task = clarificationOnly ? "修改澄清" : "评阅";
+            const message = task + (success ? "完成 · " : result.status === "partial" ? "部分完成 · " : "受阻 · ")
                 + version.number + " · " + result.summary.slice(0, 160);
             if (active) {
                 const wasLatest = this.isLatest;
@@ -686,6 +730,7 @@ class Review {
             }
             if (message.type === "browseDirectory") await this.browseDirectory(message.directory);
             if (message.type === "export") await this.exportRequest(message.directory, message.automation);
+            if (message.type === "exportClarifications") await this.exportRequest(message.directory, undefined, "clarifications");
         } else {
             if (message.type === "reveal") await this.reveal(message.fileId, message.side, message.start, message.end);
             if (message.type === "opinion") {
