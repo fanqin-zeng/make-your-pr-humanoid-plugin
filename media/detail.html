@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}}; script-src {{csp}};">
+<link rel="stylesheet" href="{{style}}">
+<title>澄清与行意见</title>
+</head>
+<body class="details">
+<section id="explanations" class="detail-section" aria-label="修改澄清">
+  <header class="section-head"><h2>修改澄清</h2><span class="meta" id="file-name"></span></header>
+  <p class="empty" id="clarifications-empty">从左侧选择文件查看 diff。</p>
+  <ol class="points" id="points"></ol>
+</section>
+<div id="splitter" role="separator" aria-label="调整澄清和意见的高度" aria-orientation="horizontal" aria-valuemin="12" aria-valuemax="72" aria-valuenow="20" tabindex="0"></div>
+<section class="detail-section opinions" aria-label="行意见">
+  <header class="section-head"><h2>行意见</h2><span class="meta" id="selection"></span></header>
+  <form id="form">
+    <textarea id="note" rows="3" maxlength="8000" aria-label="对所选行填写意见" placeholder="在 diff 中选择行或行范围，然后填写意见。"></textarea>
+    <div class="actions">
+      <button id="send" type="submit" disabled>添加意见</button>
+      <button id="discard" class="secondary" type="button" hidden>取消编辑</button>
+    </div>
+  </form>
+  <div id="threads"></div>
+  <details id="archived" hidden><summary>其他文件的历史意见</summary><div id="old-threads"></div></details>
+</section>
+<script src="{{script}}"></script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{csp}}; script-src {{csp}};">
+<link rel="stylesheet" href="{{style}}">
+<title>仓库与评阅任务</title>
+</head>
+<body class="controls">
+<section class="fields" aria-label="分支比较">
+  <label for="repository">Git 仓库</label>
+  <select id="repository"></select>
+  <label for="target">合入分支 <small>目标</small></label>
+  <select id="target"></select>
+  <label for="source">被合入分支 <small>来源</small></label>
+  <select id="source"></select>
+  <label for="version">评阅版本</label>
+  <select id="version"></select>
+  <div class="actions">
+    <button id="refresh" class="secondary" type="button">刷新比较</button>
+    <button id="discover" class="secondary" type="button">扫描仓库</button>
+  </div>
+  <p id="comparison" class="muted meta" hidden></p>
+</section>
+<section class="fields" aria-label="导出评阅任务">
+  <label for="directory">保存目录</label>
+  <div class="directory">
+    <input id="directory" type="text" spellcheck="false">
+    <button id="browse" class="secondary" type="button">浏览</button>
+  </div>
+  <div class="automation" aria-label="自动化操作">
+    <label><input id="auto-edit" type="checkbox"> 自动修改</label>
+    <label><input id="auto-commit" type="checkbox"> 自动 commit</label>
+    <label><input id="auto-push" type="checkbox"> 自动 push</label>
+  </div>
+  <button id="export" type="button">导出更新需求prompt</button>
+  <p id="waiting" class="muted meta" hidden></p>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+</section>
+<script src="{{script}}"></script>
+</body>
+</html>

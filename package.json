@@ -1,0 +1,132 @@
+{
+  "name": "workspace-pr-review",
+  "displayName": "Make Your PR Humanoid",
+  "description": "在 Qoder 或 VS Code 中评阅 Git 分支、记录行意见并导出评阅任务。",
+  "version": "0.5.0",
+  "publisher": "workspace-tools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fanqin-zeng/make-your-pr-humanoid-plugin.git"
+  },
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "main": "./src/extension.js",
+  "extensionKind": ["workspace"],
+  "categories": [
+    "Source Control",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:workspacePrReview.controls",
+    "onView:workspacePrReview.files",
+    "onCommand:workspacePrReview.open",
+    "onCommand:workspacePrReview.importClarifications"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "workspacePrReview",
+          "title": "分支评阅",
+          "icon": "media/review.svg"
+        }
+      ]
+    },
+    "views": {
+      "workspacePrReview": [
+        {
+          "id": "workspacePrReview.controls",
+          "type": "webview",
+          "name": "仓库与评阅任务"
+        },
+        {
+          "id": "workspacePrReview.files",
+          "name": "变更文件"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "workspacePrReview.open",
+        "title": "打开分支评阅",
+        "category": "评阅",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "workspacePrReview.refresh",
+        "title": "刷新比较",
+        "category": "评阅",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "workspacePrReview.openFile",
+        "title": "打开评阅 Diff",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.selectLines",
+        "title": "对选中行添加意见",
+        "category": "评阅",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "workspacePrReview.addEditorComment",
+        "title": "添加评阅意见"
+      },
+      {
+        "command": "workspacePrReview.importClarifications",
+        "title": "导入 HTML 评阅的修改澄清",
+        "category": "评阅"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "workspacePrReview.refresh",
+          "when": "view == workspacePrReview.files",
+          "group": "navigation"
+        },
+        {
+          "command": "workspacePrReview.open",
+          "when": "view == workspacePrReview.files",
+          "group": "navigation@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "workspacePrReview.selectLines",
+          "when": "resourceScheme == workspace-pr-review",
+          "group": "navigation@20"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "workspacePrReview.addEditorComment",
+          "when": "commentController == workspacePrReview && !commentThread",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "workspacePrReview.openFile",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.addEditorComment",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.selectLines",
+          "when": "resourceScheme == workspace-pr-review"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,51 @@
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; min-width: 0; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); }
+body, select, button, textarea, input { font: var(--vscode-font-size, 13px)/1.5 var(--vscode-font-family, sans-serif); }
+.controls { padding: 12px; }
+.fields { display: grid; gap: 6px; }
+.fields + .fields { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, #7775)); }
+label { font-weight: 600; }
+label small, .muted, .meta, .empty { color: var(--vscode-descriptionForeground); }
+select, textarea, input[type=text] { min-width: 0; width: 100%; padding: 4px 7px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, #7775)); border-radius: 3px; }
+select { min-height: 29px; }
+select + label { margin-top: 3px; }
+button { border: 1px solid transparent; border-radius: 3px; padding: 4px 9px; text-align: center; cursor: pointer; color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+button:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
+button.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+button.secondary:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground); }
+button:disabled { opacity: .55; cursor: default; }
+:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.status { align-self: start; min-height: 24px; margin: 3px 0 0; overflow-wrap: anywhere; }
+.automation { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.directory { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.directory button { white-space: nowrap; }
+#waiting { margin: 2px 0; }
+.automation label { display: inline-flex; align-items: center; gap: 4px; font-weight: normal; white-space: nowrap; }
+.automation input { margin: 0; accent-color: var(--vscode-button-background); }
+.status[data-kind=busy] { color: var(--vscode-progressBar-background); }
+.status[data-kind=error] { color: var(--vscode-errorForeground); }
+.status[data-kind=success] { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
+.meta { font-size: .91em; overflow-wrap: anywhere; }
+#comparison { margin: 2px 0; }
+.details { height: 100vh; display: grid; grid-template-rows: minmax(36px, 2fr) 7px minmax(75px, 8fr); overflow: hidden; }
+.detail-section { overflow: auto; padding: 0 12px 10px; min-height: 0; }
+.section-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; column-gap: 8px; margin: 8px 0; }
+.section-head h2 { font-size: 1em; margin: 0; }
+.section-head .meta { white-space: normal; }
+#splitter { cursor: row-resize; background: var(--vscode-sideBarSectionHeader-background); border-block: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, #7775)); touch-action: none; }
+#splitter:hover, #splitter:focus-visible { background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder)); }
+.points { padding-left: 20px; margin: 6px 0 0; }
+.points li { margin-bottom: 9px; }
+.points p, .thread p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 3px 0; }
+#threads { display: grid; gap: 8px; margin-top: 9px; }
+.thread { padding: 8px; border: 1px solid var(--vscode-widget-border, #7775); border-radius: 4px; }
+.thread .actions { align-items: baseline; margin: 0 0 5px; }
+.link { padding: 0; border: 0; color: var(--vscode-textLink-foreground); background: transparent; text-align: left; }
+.link:hover:not(:disabled) { background: transparent; color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+.reply { margin-top: 8px; padding-left: 9px; border-left: 2px solid var(--vscode-editorWidget-border, #7775); }
+.reply strong { font-size: .92em; }
+#archived { margin-top: 13px; }
+#old-threads { margin-top: 7px; }
+textarea { resize: vertical; min-height: 50px; }
