@@ -120,7 +120,7 @@ class Review {
             version: this.record?.number, historical: Boolean(this.record && !this.isLatest),
             status: this.status, ready: this.isLatest && Boolean(this.snapshot?.files.length || this.record?.opinions.length),
             clarificationReady: this.isLatest && this.snapshot.files.some(file => file.rows.length),
-            directory: this.snapshot ? this.context.workspaceState.get(directoryKey, this.requestDirectory()) : "",
+            directory: this.snapshot ? this.exportDirectory : "",
             waiting: Object.values(this.exports.pending).filter(job => job.storeKey === this.storeKey).length,
             automation: changes.automation(this.data?.automation),
             busy: this.busy,
@@ -232,9 +232,11 @@ class Review {
             }
             const data = structuredClone(stored || { versions: [] });
             const { version, snapshot } = await versions.refresh(repository, this.target, this.source, data, storageId);
+            const directory = await this.requestDirectory();
             if (request !== this.pending) return;
             this.storeKey = storeKey;
             this.data = data;
+            this.exportDirectory = directory;
             this.show(snapshot, version, previousFile);
             await this.context.workspaceState.update(key, { repository, target: this.target, source: this.source });
             await this.save();
@@ -481,20 +483,34 @@ class Review {
 
     get busy() { return Boolean(this.loading || this.exporting || this.receiving); }
 
-    requestDirectory(input) {
+    async requestDirectory(input) {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || this.repository || this.context.storageUri?.fsPath;
-        const value = typeof input === "string" && input.trim();
-        return value ? path.resolve(root, value) : path.join(root, ".qoder-review", "requests");
+        const isQoder = /^qoder(?:-|$)/i.test(vscode.env.uriScheme);
+        const names = isQoder ? [".qoder-review", ".vscode-review"] : [".vscode-review", ".qoder-review"];
+        const locations = names.map(name => path.join(root, name, "requests"));
+        const compare = value => process.platform === "win32" ? value.toLowerCase() : value;
+        const value = typeof input === "string" ? input.trim() : undefined;
+        const typed = value && path.resolve(root, value);
+        if (typed && compare(typed) !== compare(this.exportDirectory || "")) return typed;
+
+        const saved = this.context.workspaceState.get(directoryKey);
+        if (value !== "" && saved && !locations.some(item => compare(item) === compare(saved))) return saved;
+        for (const location of locations) {
+            const folder = await fs.stat(path.dirname(location)).catch(() => null);
+            if (folder?.isDirectory()) return location;
+        }
+        return locations[0];
     }
 
     async browseDirectory(input) {
         if (this.busy || !this.snapshot) return;
         const picked = await vscode.window.showOpenDialog({
             canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
-            defaultUri: vscode.Uri.file(this.requestDirectory(input)), title: "选择评阅需求保存目录",
+            defaultUri: vscode.Uri.file(await this.requestDirectory(input)), title: "选择评阅需求保存目录",
         });
         if (!picked?.length) return;
         await this.context.workspaceState.update(directoryKey, picked[0].fsPath);
+        this.exportDirectory = picked[0].fsPath;
         this.controls?.webview.postMessage({ type: "directory", value: picked[0].fsPath });
         this.notify();
     }
@@ -533,7 +549,7 @@ class Review {
                 return;
             }
             if (!opinions.length && !clarificationFiles.length) throw new Error("没有待回复的意见或待澄清的文件。");
-            const directory = this.requestDirectory(input);
+            const directory = await this.requestDirectory(input);
             const job = await handoff.writeRequest(directory, {
                 purpose, version, repository, target, source, targetCommit, base, sourceHead: sourceCommit,
                 sourceTree: head, actions, pushDestination, opinions, clarificationFiles,
@@ -541,6 +557,7 @@ class Review {
             await this.exports.add({ ...job, storeKey: this.storeKey, storageId });
             if (!clarificationOnly) this.data.automation = actions;
             await this.context.workspaceState.update(directoryKey, directory);
+            this.exportDirectory = directory;
             await this.save();
             const exported = clarificationOnly ? clarificationFiles.length + " 个文件待澄清" : opinions.length + " 条意见";
             this.status = { kind: "success", text: "已导出 " + version + " · " + exported };

@@ -1,3 +1,4 @@
 /dist/
 /.qoder-review/
+/.vscode-review/
 __pycache__/
