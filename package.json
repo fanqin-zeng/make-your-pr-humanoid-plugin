@@ -2,7 +2,7 @@
   "name": "workspace-pr-review",
   "displayName": "Make Your PR Humanoid",
   "description": "在 Qoder 或 VS Code 中评阅 Git 分支、记录行意见并导出评阅任务。",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "publisher": "workspace-tools",
   "repository": {
     "type": "git",
@@ -23,6 +23,7 @@
     "onStartupFinished",
     "onView:workspacePrReview.controls",
     "onView:workspacePrReview.files",
+    "onView:workspacePrReview.allOpinions",
     "onCommand:workspacePrReview.open",
     "onCommand:workspacePrReview.importClarifications"
   ],
@@ -42,9 +43,22 @@
           "title": "分支评阅",
           "icon": "media/review.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "workspacePrReview.opinionsPanel",
+          "title": "全部评论",
+          "icon": "media/review.svg"
+        }
       ]
     },
     "views": {
+      "workspacePrReview.opinionsPanel": [
+        {
+          "id": "workspacePrReview.allOpinions",
+          "name": "全部评论"
+        }
+      ],
       "workspacePrReview": [
         {
           "id": "workspacePrReview.controls",
@@ -63,6 +77,16 @@
         "title": "打开分支评阅",
         "category": "评阅",
         "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "workspacePrReview.showAllOpinions",
+        "title": "打开全部评论",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.revealOpinion",
+        "title": "在评阅详情查看评论",
+        "category": "评阅"
       },
       {
         "command": "workspacePrReview.refresh",
@@ -164,6 +188,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "workspacePrReview.revealOpinion",
+          "when": "false"
+        },
         {
           "command": "workspacePrReview.openFile",
           "when": "false"

@@ -9,6 +9,7 @@ const handoff = require("./handoff");
 const changes = require("./changes");
 const versions = require("./versions");
 const { uncoveredFiles, mergePoints, summaryLimit, summarySentences, pendingSummaries } = require("./clarifications");
+const { AllOpinions } = require("./opinions");
 
 const id = "workspacePrReview";
 const scheme = "workspace-pr-review";
@@ -16,6 +17,7 @@ const key = id + ".comparison";
 const directoryKey = id + ".exportDirectory";
 const layoutKey = id + ".fileLayout";
 const flatContext = id + ".flatFiles";
+const opinionsViewId = id + ".allOpinions";
 const statusLabels = { A: "新增", C: "复制", D: "删除", M: "修改", R: "重命名", T: "类型变更", U: "行意见" };
 
 function comparisonId(repository, target, source) {
@@ -98,6 +100,7 @@ class Review {
     constructor(context) {
         this.context = context;
         this.files = new Files(this);
+        this.allOpinions = new AllOpinions(this);
         this.scanning = [];
         this.refs = [];
         this.status = { kind: "idle", text: "选择 Git 仓库以开始评阅" };
@@ -271,6 +274,7 @@ class Review {
         this.record = version;
         this.selection = null;
         this.currentFile = snapshot.files.find(file => file.path === filePath);
+        this.updateAllOpinions();
     }
 
     async reopen(previousToken, preserveFocus = false) {
@@ -290,6 +294,7 @@ class Review {
         if (!version || version === this.record) return;
         if (version === this.data.versions.at(-1)) {
             await this.select(this.repository, this.target, this.source);
+            await this.showAllOpinions();
             return;
         }
         this.loading = true;
@@ -305,6 +310,7 @@ class Review {
             this.files.reset();
             this.notify();
         }
+        await this.showAllOpinions();
     }
 
     clear() {
@@ -314,6 +320,32 @@ class Review {
         this.currentFile = null;
         this.selection = null;
         this.files.reset();
+        this.updateAllOpinions();
+    }
+
+    updateAllOpinions() {
+        this.allOpinions.refresh();
+        const count = this.record?.opinions.length || 0;
+        this.opinionsView.description = this.record ? this.record.number + " · " + count + " 条" : undefined;
+        this.opinionsView.message = count ? undefined
+            : this.record ? "当前评阅版本没有评论。" : "在左侧选择仓库和分支。";
+    }
+
+    async showAllOpinions(preserveFocus = true) {
+        await vscode.commands.executeCommand(opinionsViewId + ".focus", { preserveFocus });
+    }
+
+    async revealOpinion(token, opinionId) {
+        if (!this.snapshot || token !== this.snapshot.token) return;
+        const opinion = this.record.opinions.find(item => item.id === opinionId);
+        if (!opinion) return;
+        const file = this.fileFor(opinion);
+        if (file?.digest === opinion.digest) {
+            await this.reveal(file.id, opinion.side, opinion.start, opinion.end);
+        } else if (file) {
+            await this.openFile(file.id, true);
+        }
+        await this.focusDetail(true);
     }
 
     async setFileLayout(flat) {
@@ -501,6 +533,7 @@ class Review {
             });
         }
         await this.save();
+        this.updateAllOpinions();
     }
 
     async save() {
@@ -739,6 +772,7 @@ class Review {
                 }
                 else {
                     this.record = data.versions.find(item => item.number === selected);
+                    this.updateAllOpinions();
                 }
                 this.status = { kind: success ? "success" : "error", text: message };
                 this.files.reset();
@@ -792,6 +826,7 @@ class Review {
         if (message.type === "ready") {
             this.notify();
             if (panel === "controls" && !this.scanning.length && !this.loading) await this.discover();
+            if (panel === "controls" && this.controls?.visible) await this.showAllOpinions();
         } else if (panel === "controls") {
             if (message.type === "discover") await this.discover();
             if (message.type === "select") await this.select(message.repository, message.target, message.source);
@@ -839,7 +874,11 @@ class Review {
         view.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(uri, "media")] };
         view.webview.onDidReceiveMessage(message => this.guard(() => this.message(message, panel)));
         const onVisibility = panel === "detail" ? view.onDidChangeViewState : view.onDidChangeVisibility;
-        onVisibility(() => { if (view.visible) this.notify(); });
+        onVisibility(() => {
+            if (!view.visible) return;
+            this.notify();
+            if (panel === "controls") void this.guard(() => this.showAllOpinions());
+        });
         view.onDidDispose(() => { if (this[panel] === view) this[panel] = undefined; });
         const file = name => view.webview.asWebviewUri(vscode.Uri.joinPath(uri, "media", name)).toString();
         const template = await fs.readFile(vscode.Uri.joinPath(uri, "media", panel + ".html").fsPath, "utf8");
@@ -856,6 +895,7 @@ class Review {
         clearTimeout(this.refreshTimer);
         this.exports.dispose();
         this.files.dispose();
+        this.allOpinions.dispose();
     }
 }
 
@@ -864,10 +904,13 @@ function activate(context) {
     const register = (command, handler) => vscode.commands.registerCommand(id + "." + command,
         (...args) => review.guard(() => handler(...args)));
     review.fileTree = vscode.window.createTreeView(id + ".files", { treeDataProvider: review.files, showCollapseAll: true });
+    review.opinionsView = vscode.window.createTreeView(opinionsViewId, { treeDataProvider: review.allOpinions });
+    review.updateAllOpinions();
     void vscode.commands.executeCommand("setContext", flatContext, review.files.flat);
     context.subscriptions.push(
         review,
         review.fileTree,
+        review.opinionsView,
         vscode.window.registerWebviewViewProvider(id + ".controls", { resolveWebviewView: view => review.bind(view, "controls") }),
         vscode.workspace.registerTextDocumentContentProvider(scheme, { provideTextDocumentContent: uri => review.document(uri) }),
         vscode.window.onDidChangeTextEditorSelection(event => review.selectEditor(event.textEditor, event.selections[0])),
@@ -877,7 +920,10 @@ function activate(context) {
         register("open", async () => {
             await vscode.commands.executeCommand(id + ".controls.focus", { preserveFocus: true });
             await review.focusDetail();
+            await review.showAllOpinions();
         }),
+        register("showAllOpinions", () => review.showAllOpinions(false)),
+        register("revealOpinion", (token, opinionId) => review.revealOpinion(token, opinionId)),
         register("refresh", () => review.select(review.repository, review.target, review.source)),
         register("openFile", fileId => review.openFile(fileId)),
         register("openWorkingFile", node => review.openWorkingFile(node)),
