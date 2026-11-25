@@ -34,6 +34,7 @@ button:disabled { opacity: .55; cursor: default; }
 .section-head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; column-gap: 8px; margin: 8px 0; }
 .section-head h2 { font-size: 1em; margin: 0; }
 .section-head .meta { white-space: normal; }
+.summary { margin: 4px 0 12px; overflow-wrap: anywhere; }
 #splitter { cursor: row-resize; background: var(--vscode-sideBarSectionHeader-background); border-block: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, #7775)); touch-action: none; }
 #splitter:hover, #splitter:focus-visible { background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder)); }
 .points { padding-left: 20px; margin: 6px 0 0; }

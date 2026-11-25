@@ -1,6 +1,38 @@
 "use strict";
 
 const submodule = /^(?:new file mode |deleted file mode |index [0-9a-f]+\.\.[0-9a-f]+ )160000\r?$/m;
+const segmenter = new Intl.Segmenter("zh-CN", { granularity: "sentence" });
+const summaryLimits = new WeakMap();
+
+function summaryLimit(file) {
+    if (!summaryLimits.has(file)) {
+        const changed = submodule.test(file.patch) ? 0
+            : file.rows.reduce((count, row) => count + Number(/^[+-]/.test(row.text)), 0);
+        summaryLimits.set(file, Math.ceil(changed / 500));
+    }
+    return summaryLimits.get(file);
+}
+
+function summarySentences(texts, limit) {
+    const sentences = new Set();
+    if (!limit) return [];
+    for (const text of texts) {
+        for (const { segment } of segmenter.segment(text)) {
+            const sentence = segment.trim();
+            if (sentence) sentences.add(sentence);
+            if (sentences.size === limit) return [...sentences];
+        }
+    }
+    return [...sentences];
+}
+
+function pendingSummaries(files, summaries = {}) {
+    return files.flatMap(file => {
+        const maxSentences = summaryLimit(file);
+        return maxSentences && summaries[file.id]?.digest !== file.digest
+            ? [{ path: file.path, oldPath: file.oldPath, status: file.status, maxSentences }] : [];
+    });
+}
 
 function missingOnSide(rows, points, side) {
     const ranges = points.filter(point => point.side === side && Number.isSafeInteger(point.start)
@@ -47,4 +79,4 @@ function mergePoints(previous, incoming) {
     return [...unique.values()];
 }
 
-module.exports = { uncoveredFiles, mergePoints };
+module.exports = { uncoveredFiles, mergePoints, summaryLimit, summarySentences, pendingSummaries };

@@ -2,7 +2,7 @@
   "name": "workspace-pr-review",
   "displayName": "Make Your PR Humanoid",
   "description": "在 Qoder 或 VS Code 中评阅 Git 分支、记录行意见并导出评阅任务。",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "publisher": "workspace-tools",
   "repository": {
     "type": "git",
@@ -12,7 +12,9 @@
     "vscode": "^1.106.0"
   },
   "main": "./src/extension.js",
-  "extensionKind": ["workspace"],
+  "extensionKind": [
+    "workspace"
+  ],
   "categories": [
     "Source Control",
     "Other"
@@ -74,46 +76,91 @@
         "category": "评阅"
       },
       {
-        "command": "workspacePrReview.selectLines",
-        "title": "对选中行添加意见",
-        "category": "评阅",
-        "icon": "$(comment)"
-      },
-      {
-        "command": "workspacePrReview.addEditorComment",
-        "title": "添加评阅意见"
-      },
-      {
         "command": "workspacePrReview.importClarifications",
         "title": "导入 HTML 评阅的修改澄清",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.openWorkingFile",
+        "title": "打开工作树中的文件",
+        "category": "评阅",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "workspacePrReview.expandFolders",
+        "title": "展开所有目录",
+        "category": "评阅",
+        "icon": "$(expand-all)"
+      },
+      {
+        "command": "workspacePrReview.showFlatFiles",
+        "title": "切换为平铺显示",
+        "category": "评阅",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "workspacePrReview.showFileTree",
+        "title": "切换为文件树",
+        "category": "评阅",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "workspacePrReview.copyFileName",
+        "title": "复制文件名",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.copyFileAbsolute",
+        "title": "复制文件绝对路径",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.copyFileRelative",
+        "title": "复制文件相对路径",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.copyFolderName",
+        "title": "复制目录名",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.copyFolderAbsolute",
+        "title": "复制目录绝对路径",
+        "category": "评阅"
+      },
+      {
+        "command": "workspacePrReview.copyFolderRelative",
+        "title": "复制目录相对路径",
         "category": "评阅"
       }
     ],
     "menus": {
       "view/title": [
         {
+          "command": "workspacePrReview.expandFolders",
+          "when": "view == workspacePrReview.files && !workspacePrReview.flatFiles",
+          "group": "navigation@1"
+        },
+        {
+          "command": "workspacePrReview.showFlatFiles",
+          "when": "view == workspacePrReview.files && !workspacePrReview.flatFiles",
+          "group": "navigation@2"
+        },
+        {
+          "command": "workspacePrReview.showFileTree",
+          "when": "view == workspacePrReview.files && workspacePrReview.flatFiles",
+          "group": "navigation@2"
+        },
+        {
           "command": "workspacePrReview.refresh",
           "when": "view == workspacePrReview.files",
-          "group": "navigation"
+          "group": "navigation@3"
         },
         {
           "command": "workspacePrReview.open",
           "when": "view == workspacePrReview.files",
-          "group": "navigation@1"
-        }
-      ],
-      "editor/context": [
-        {
-          "command": "workspacePrReview.selectLines",
-          "when": "resourceScheme == workspace-pr-review",
-          "group": "navigation@20"
-        }
-      ],
-      "comments/commentThread/context": [
-        {
-          "command": "workspacePrReview.addEditorComment",
-          "when": "commentController == workspacePrReview && !commentThread",
-          "group": "inline"
+          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -122,12 +169,98 @@
           "when": "false"
         },
         {
-          "command": "workspacePrReview.addEditorComment",
+          "command": "workspacePrReview.openWorkingFile",
           "when": "false"
         },
         {
-          "command": "workspacePrReview.selectLines",
-          "when": "resourceScheme == workspace-pr-review"
+          "command": "workspacePrReview.expandFolders",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.showFlatFiles",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.showFileTree",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.copyFileName",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.copyFileAbsolute",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.copyFileRelative",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.copyFolderName",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.copyFolderAbsolute",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.copyFolderRelative",
+          "when": "false"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "workspacePrReview.openWorkingFile",
+          "when": "view == workspacePrReview.files && viewItem == reviewFile",
+          "group": "inline"
+        },
+        {
+          "command": "workspacePrReview.copyFileName",
+          "when": "view == workspacePrReview.files && viewItem == reviewFile",
+          "group": "6_reviewPath@1"
+        },
+        {
+          "command": "workspacePrReview.copyFileAbsolute",
+          "when": "view == workspacePrReview.files && viewItem == reviewFile",
+          "group": "6_reviewPath@2"
+        },
+        {
+          "command": "workspacePrReview.copyFileRelative",
+          "when": "view == workspacePrReview.files && viewItem == reviewFile",
+          "group": "6_reviewPath@3"
+        },
+        {
+          "command": "workspacePrReview.copyFolderName",
+          "when": "view == workspacePrReview.files && viewItem == reviewFolder",
+          "group": "6_reviewPath@1"
+        },
+        {
+          "command": "workspacePrReview.copyFolderAbsolute",
+          "when": "view == workspacePrReview.files && viewItem == reviewFolder",
+          "group": "6_reviewPath@2"
+        },
+        {
+          "command": "workspacePrReview.copyFolderRelative",
+          "when": "view == workspacePrReview.files && viewItem == reviewFolder",
+          "group": "6_reviewPath@3"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "workspacePrReview.copyFileName",
+          "when": "resourceScheme == workspace-pr-review",
+          "group": "6_reviewPath@1"
+        },
+        {
+          "command": "workspacePrReview.copyFileAbsolute",
+          "when": "resourceScheme == workspace-pr-review",
+          "group": "6_reviewPath@2"
+        },
+        {
+          "command": "workspacePrReview.copyFileRelative",
+          "when": "resourceScheme == workspace-pr-review",
+          "group": "6_reviewPath@3"
         }
       ]
     }

@@ -7,6 +7,7 @@ const note = get("note");
 let state = {};
 let editingId;
 let submitting = false;
+const rendered = new Map();
 
 function element(tag, text, className) {
     const value = document.createElement(tag);
@@ -22,8 +23,9 @@ function lineLabel(side, start, end) {
 function rangeButton(fileId, range) {
     const button = element("button", lineLabel(range.side, range.start, range.end), "link");
     button.type = "button";
+    const comparison = state.comparison;
     button.onclick = () => host.postMessage({
-        type: "reveal", fileId, side: range.side, start: range.start, end: range.end,
+        type: "reveal", comparison, fileId, side: range.side, start: range.start, end: range.end,
     });
     return button;
 }
@@ -66,11 +68,15 @@ function thread(opinion, current) {
     return card;
 }
 
+function renderList(id, items, render, ...dependencies) {
+    // Editor focus changes can send state between pointer down and click.
+    const key = JSON.stringify([state.comparison, state.file?.id, items, ...dependencies]);
+    if (rendered.get(id) === key) return;
+    rendered.set(id, key);
+    get(id).replaceChildren(...items.map(render));
+}
+
 window.addEventListener("message", event => {
-    if (event.data.type === "focusOpinion") {
-        note.focus();
-        return;
-    }
     if (event.data.type === "submitted") {
         submitting = false;
         editingId = undefined;
@@ -91,20 +97,25 @@ window.addEventListener("message", event => {
     }
     state = event.data.state;
     get("file-name").textContent = [state.version, state.file?.path].filter(Boolean).join(" · ");
+    const summary = get("change-summary");
+    summary.classList.toggle("empty", !state.summary.length);
+    summary.textContent = state.summary.length ? state.summary.join(" ")
+        : !state.file ? "从左侧选择文件。"
+            : !state.maxSentences ? "无文本行变更。" : "导出修改澄清需求后生成摘要。";
     get("form").hidden = state.historical;
     get("clarifications-empty").hidden = Boolean(state.points.length);
     get("clarifications-empty").textContent = state.file
-        ? "可在左侧运行 Agent 以生成当前文件的修改说明。"
-        : "从左侧选择文件查看 diff。";
-    get("points").replaceChildren(...state.points.map(point => {
+        ? "可在左侧导出修改澄清需求。"
+        : "";
+    renderList("points", state.points, point => {
         const item = element("li");
         if (point.start) item.append(rangeButton(state.file.id, point));
         item.append(element("p", point.text));
         return item;
-    }));
-    get("threads").replaceChildren(...state.opinions.map(opinion => thread(opinion, true)));
+    });
+    renderList("threads", state.opinions, opinion => thread(opinion, true), state.historical, state.updating);
     get("archived").hidden = !state.archived.length;
-    get("old-threads").replaceChildren(...state.archived.map(opinion => thread(opinion, false)));
+    renderList("old-threads", state.archived, opinion => thread(opinion, false), state.historical, state.updating);
     showDraft();
 });
 

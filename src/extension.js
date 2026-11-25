@@ -8,12 +8,14 @@ const git = require("./git");
 const handoff = require("./handoff");
 const changes = require("./changes");
 const versions = require("./versions");
-const { uncoveredFiles, mergePoints } = require("./clarifications");
+const { uncoveredFiles, mergePoints, summaryLimit, summarySentences, pendingSummaries } = require("./clarifications");
 
 const id = "workspacePrReview";
 const scheme = "workspace-pr-review";
 const key = id + ".comparison";
 const directoryKey = id + ".exportDirectory";
+const layoutKey = id + ".fileLayout";
+const flatContext = id + ".flatFiles";
 const statusLabels = { A: "新增", C: "复制", D: "删除", M: "修改", R: "重命名", T: "类型变更", U: "行意见" };
 
 function comparisonId(repository, target, source) {
@@ -33,6 +35,7 @@ function selectedLines(range) {
 class Files {
     constructor(review) {
         this.review = review;
+        this.flat = review.context.workspaceState.get(layoutKey) === "flat";
         this.change = new vscode.EventEmitter();
         this.onDidChangeTreeData = this.change.event;
     }
@@ -41,20 +44,26 @@ class Files {
         return node ? node.children || [] : this.roots || [];
     }
 
+    getParent(node) { return node.parent; }
+
     reset() {
+        const snapshot = this.review.snapshot;
         const root = { children: [] };
-        for (const file of this.review.snapshot?.files || []) {
+        for (const file of snapshot?.files || []) {
             const parts = file.path.split("/");
             let parent = root;
-            for (const part of parts.slice(0, -1)) {
+            for (const part of this.flat ? [] : parts.slice(0, -1)) {
                 let folder = parent.children.find(item => item.children && item.label === part);
                 if (!folder) {
-                    folder = { label: part, children: [] };
+                    const relative = parent.relative ? parent.relative + "/" + part : part;
+                    folder = { label: part, relative, repository: snapshot.repository, children: [],
+                        parent: parent === root ? undefined : parent };
                     parent.children.push(folder);
                 }
                 parent = folder;
             }
-            parent.children.push({ label: parts.at(-1), file });
+            parent.children.push({ label: parts.at(-1), relative: file.path, repository: snapshot.repository,
+                file, parent: parent === root ? undefined : parent });
         }
         this.roots = root.children;
         this.change.fire();
@@ -63,14 +72,18 @@ class Files {
     getTreeItem(node) {
         const item = new vscode.TreeItem(node.label, node.children
             ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
+        item.id = JSON.stringify([node.repository, node.children ? "folder" : "file", node.relative]);
+        item.contextValue = node.children ? "reviewFolder" : "reviewFile";
         if (node.children) {
             item.iconPath = vscode.ThemeIcon.Folder;
+            item.tooltip = node.relative;
         } else {
             const { file } = node;
             const record = this.review.record?.read[file.id];
             const read = record === file.digest ? "已读" : record ? "待复看" : "未读";
             const count = this.review.opinions(file).length;
-            item.description = statusLabels[file.status[0]] + " · " + read + (count ? " · " + count + " 条意见" : "");
+            const folder = this.flat && file.path.includes("/") ? path.posix.dirname(file.path) + " · " : "";
+            item.description = folder + statusLabels[file.status[0]] + " · " + read + (count ? " · " + count + " 条意见" : "");
             item.tooltip = file.oldPath ? file.oldPath + " → " + file.path : file.path;
             item.resourceUri = this.review.uri(file, file.status[0] === "D" ? "old" : "new");
             item.command = { command: id + ".openFile", title: "打开 Diff", arguments: [file.id] };
@@ -89,22 +102,11 @@ class Review {
         this.refs = [];
         this.status = { kind: "idle", text: "选择 Git 仓库以开始评阅" };
         this.snapshots = new Map();
-        this.threads = new Map();
         this.pending = 0;
         this.exports = new handoff.ResultWatcher(context.workspaceState,
             (job, result) => this.receiveResult(job, result),
             message => vscode.window.showWarningMessage("评阅回传：" + message),
             () => this.notify());
-        this.comments = vscode.comments.createCommentController(id, "分支评阅");
-        this.comments.options = { placeHolder: "对当前行范围填写评阅意见", prompt: "添加评阅意见" };
-        this.comments.commentingRangeProvider = {
-            provideCommentingRanges: document => {
-                const location = this.locate(document.uri);
-                return this.isLatest && location && location.snapshot === this.snapshot && location.present
-                    ? [new vscode.Range(0, 0, document.lineCount - 1, document.lineAt(document.lineCount - 1).text.length)]
-                    : [];
-            },
-        };
     }
 
     get isLatest() { return Boolean(this.record && this.record === this.data?.versions.at(-1)); }
@@ -129,14 +131,20 @@ class Review {
                 head: this.snapshot.sourceCommit.slice(0, 7), working: this.snapshot.working, count: this.snapshot.files.length,
             },
         } });
+        if (!this.detail) return;
         const file = this.currentFile;
-        this.detail?.webview.postMessage({ type: "state", state: {
+        const clarification = file && this.record?.clarifications[file.id];
+        const points = clarification?.digest === file?.digest ? clarification?.points || [] : [];
+        const storedSummary = file && this.record?.summaries?.[file.id];
+        const maxSentences = file ? summaryLimit(file) : 0;
+        const summary = storedSummary && storedSummary.digest === file.digest
+            ? storedSummary.sentences : summarySentences(points.map(point => point.text), maxSentences);
+        this.detail.webview.postMessage({ type: "state", state: {
             comparison: this.snapshot?.token || null,
             version: this.record?.number, historical: Boolean(this.record && !this.isLatest),
             file: file && { id: file.id, path: file.path, oldPath: file.oldPath },
             selection: this.selection,
-            points: file && this.record?.clarifications[file.id]?.digest === file.digest
-                ? this.record.clarifications[file.id].points : [],
+            points, summary, maxSentences,
             opinions: file ? this.opinions(file).map(opinion => ({
                 ...opinion, stale: opinion.digest !== file.digest,
                 pending: opinion.replies.at(-1)?.revision !== opinion.revision,
@@ -263,7 +271,6 @@ class Review {
         this.record = version;
         this.selection = null;
         this.currentFile = snapshot.files.find(file => file.path === filePath);
-        this.syncThreads();
     }
 
     async reopen(previousToken, preserveFocus = false) {
@@ -306,9 +313,49 @@ class Review {
         this.record = null;
         this.currentFile = null;
         this.selection = null;
-        for (const thread of this.threads.values()) thread.dispose();
-        this.threads.clear();
         this.files.reset();
+    }
+
+    async setFileLayout(flat) {
+        this.files.flat = flat;
+        this.files.reset();
+        await this.context.workspaceState.update(layoutKey, flat ? "flat" : "tree");
+        await vscode.commands.executeCommand("setContext", flatContext, flat);
+    }
+
+    async expandFolders() {
+        if (this.files.flat) return;
+        const nodes = [...this.files.getChildren()];
+        for (const node of nodes) {
+            if (!node.children) continue;
+            await this.fileTree.reveal(node, { expand: true, select: false, focus: false });
+            nodes.push(...node.children);
+        }
+    }
+
+    async copyPath(target, format) {
+        const location = target instanceof vscode.Uri ? this.locate(target) : null;
+        const repository = location?.snapshot.repository || target?.repository;
+        const relative = location?.file.path || target?.relative;
+        if (!repository || !relative) return;
+        const value = format === "name" ? path.posix.basename(relative)
+            : format === "absolute" ? path.join(repository, relative) : relative;
+        await vscode.env.clipboard.writeText(value);
+    }
+
+    async openWorkingFile(node) {
+        if (!node?.file) return;
+        const filename = path.join(node.repository, node.relative);
+        const stat = await fs.stat(filename).catch(error => {
+            if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+            throw error;
+        });
+        if (!stat?.isFile()) {
+            void vscode.window.showWarningMessage("当前检出的工作树中找不到文件 " + node.relative);
+            return;
+        }
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filename));
+        await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One });
     }
 
     uri(file, side, snapshot = this.snapshot) {
@@ -373,24 +420,49 @@ class Review {
     }
 
     async reveal(fileId, side, start, end) {
-        const file = this.snapshot?.fileMap.get(fileId);
+        const snapshot = this.snapshot;
+        const file = snapshot?.fileMap.get(fileId);
         if (!file || !["old", "new"].includes(side) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 1 || end < start) return;
+        const uri = this.uri(file, side, snapshot);
+        if (!this.locate(uri)?.present) return;
         const first = vscode.window.tabGroups.all.find(group => group.viewColumn === vscode.ViewColumn.One);
         const input = first?.activeTab?.input;
-        if (!(input instanceof vscode.TabInputTextDiff) || this.locate(input.modified)?.file !== file) {
-            await this.openFile(fileId);
+        if (!(input instanceof vscode.TabInputTextDiff) || input.modified.toString() !== this.uri(file, "new", snapshot).toString()) {
+            await this.openFile(fileId, true);
         }
-        const uri = this.uri(file, side);
         await vscode.commands.executeCommand("workbench.action.focusFirstEditorGroup");
         await vscode.commands.executeCommand("workbench.action.compareEditor." + (side === "old" ? "focusSecondarySide" : "focusPrimarySide"));
-        const active = vscode.window.activeTextEditor;
-        const visible = vscode.window.visibleTextEditors.find(editor => editor.document.uri.toString() === uri.toString());
-        const editor = active?.document.uri.toString() === uri.toString() ? active
-            : visible || await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.One, preview: true });
+        const editor = await this.visibleDiffEditor(uri)
+            || await vscode.window.showTextDocument(uri, { viewColumn: vscode.ViewColumn.One, preview: true });
+        if (this.snapshot !== snapshot) return;
         const range = editor.document.validateRange(editorRange(start, end));
         editor.selection = new vscode.Selection(range.start, range.end);
         editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
         this.selectEditor(editor, range);
+    }
+
+    async visibleDiffEditor(uri) {
+        const value = uri.toString();
+        const visible = () => [vscode.window.activeTextEditor, ...vscode.window.visibleTextEditors]
+            .find(editor => editor?.document.uri.toString() === value);
+        const editor = visible();
+        if (editor) return editor;
+        // The focus command can finish before the extension host receives the editor update.
+        return new Promise(resolve => {
+            const finish = editor => {
+                clearTimeout(timeout);
+                editors.dispose();
+                active.dispose();
+                resolve(editor);
+            };
+            const changed = () => {
+                const editor = visible();
+                if (editor) finish(editor);
+            };
+            const editors = vscode.window.onDidChangeVisibleTextEditors(changed);
+            const active = vscode.window.onDidChangeActiveTextEditor(changed);
+            const timeout = setTimeout(() => finish(visible()), 350);
+        });
     }
 
     fileFor(opinion) {
@@ -428,47 +500,7 @@ class Review {
                 digest: file.digest, excerpt, text: text.trim(), createdAt: new Date().toISOString(), replies: [],
             });
         }
-        this.syncThreads();
         await this.save();
-    }
-
-    async addFromEditor(reply) {
-        const location = reply?.thread && this.locate(reply.thread.uri);
-        if (!location || location.snapshot !== this.snapshot) return;
-        const range = selectedLines(reply.thread.range);
-        await this.addOpinion({ fileId: location.file.id, side: location.side, ...range }, reply.text);
-        reply.thread.dispose();
-    }
-
-    syncThreads() {
-        const ids = new Set();
-        for (const opinion of this.record?.opinions || []) {
-            const file = this.fileFor(opinion);
-            if (!file || opinion.digest !== file.digest) continue;
-            ids.add(opinion.id);
-            const toComment = (name, body, time, label) => ({
-                author: { name }, body, mode: vscode.CommentMode.Preview, timestamp: new Date(time), label,
-            });
-            const comments = [toComment("我", opinion.text, opinion.createdAt, ""),
-                ...opinion.replies.map(reply => toComment("Agent", reply.text, reply.at, ""))];
-            const existing = this.threads.get(opinion.id);
-            if (existing && existing.uri.toString() === this.uri(file, opinion.side).toString()) existing.comments = comments;
-            else {
-                existing?.dispose();
-                const thread = this.comments.createCommentThread(this.uri(file, opinion.side),
-                    editorRange(opinion.start, opinion.end), comments);
-                thread.canReply = false;
-                thread.contextValue = "savedOpinion";
-                thread.label = "评阅意见";
-                this.threads.set(opinion.id, thread);
-            }
-        }
-        for (const [opinionId, thread] of this.threads) {
-            if (!ids.has(opinionId)) {
-                thread.dispose();
-                this.threads.delete(opinionId);
-            }
-        }
     }
 
     async save() {
@@ -544,22 +576,27 @@ class Review {
                 : this.snapshot.files
                     .filter(file => file.status !== "U" && this.record.clarifications[file.id]?.digest !== file.digest)
                     .map(({ path, oldPath, status, digest }) => ({ path, oldPath, status, digest }));
-            if (clarificationOnly && !clarificationFiles.length) {
-                void vscode.window.showInformationMessage("当前版本没有待澄清的文本变更行。");
+            const summaryFiles = pendingSummaries(this.snapshot.files, this.record.summaries);
+            if (clarificationOnly && !clarificationFiles.length && !summaryFiles.length) {
+                void vscode.window.showInformationMessage("当前版本的变更摘要和行澄清已齐全。");
                 return;
             }
-            if (!opinions.length && !clarificationFiles.length) throw new Error("没有待回复的意见或待澄清的文件。");
+            if (!opinions.length && !clarificationFiles.length && !summaryFiles.length) {
+                throw new Error("没有待回复的意见、摘要或澄清。");
+            }
             const directory = await this.requestDirectory(input);
             const job = await handoff.writeRequest(directory, {
                 purpose, version, repository, target, source, targetCommit, base, sourceHead: sourceCommit,
-                sourceTree: head, actions, pushDestination, opinions, clarificationFiles,
+                sourceTree: head, actions, pushDestination, opinions, clarificationFiles, summaryFiles,
             });
             await this.exports.add({ ...job, storeKey: this.storeKey, storageId });
             if (!clarificationOnly) this.data.automation = actions;
             await this.context.workspaceState.update(directoryKey, directory);
             this.exportDirectory = directory;
             await this.save();
-            const exported = clarificationOnly ? clarificationFiles.length + " 个文件待澄清" : opinions.length + " 条意见";
+            const exported = clarificationOnly
+                ? new Set([...clarificationFiles, ...summaryFiles].map(file => file.path)).size + " 个文件待说明"
+                : opinions.length + " 条意见";
             this.status = { kind: "success", text: "已导出 " + version + " · " + exported };
             void this.showExportActions(job.filename);
             return job;
@@ -629,19 +666,23 @@ class Review {
             const clarifications = new Map();
             const filesByPath = new Map(snapshot.files.map(file => [file.path, file]));
             const cachedBlobs = new Map();
+            const blobFor = (file, side) => {
+                const name = side === "old" ? file.oldPath || file.path : file.path;
+                const object = side === "old" ? snapshot.base : snapshot.head;
+                const key = object + "\0" + name;
+                if (!cachedBlobs.has(key)) cachedBlobs.set(key, versions.blobId(repository, object, name));
+                return cachedBlobs.get(key);
+            };
+            const cachedLengths = new Map();
             for (const point of result.clarifications) {
                 const file = filesByPath.get(point.path);
                 if (!file) continue;
-                const name = point.side === "old" ? file.oldPath || file.path : file.path;
-                const object = point.side === "old" ? snapshot.base : snapshot.head;
-                const cacheKey = object + "\0" + name;
-                if (!cachedBlobs.has(cacheKey)) {
-                    const blob = await versions.blobId(repository, object, name);
-                    const length = blob ? (await git.blob(snapshot, file, point.side)).split("\n").length : 0;
-                    cachedBlobs.set(cacheKey, { blob, length });
+                const blob = await blobFor(file, point.side);
+                if (blob !== point.blob) continue;
+                if (!cachedLengths.has(blob)) {
+                    cachedLengths.set(blob, (await git.blob(snapshot, file, point.side)).split("\n").length);
                 }
-                const { blob, length } = cachedBlobs.get(cacheKey);
-                if (blob !== point.blob || point.end > length) continue;
+                if (point.end > cachedLengths.get(blob)) continue;
                 if (!clarifications.has(file.id)) clarifications.set(file.id, { digest: file.digest, points: [] });
                 const { side, start, end, text } = point;
                 clarifications.get(file.id).points.push({ side, start, end, text });
@@ -653,6 +694,15 @@ class Review {
                 }
                 version.clarifications[fileId] = value;
             }
+            for (const item of result.fileSummaries || []) {
+                const file = filesByPath.get(item.path);
+                if (!file) continue;
+                const sentences = summarySentences(item.sentences, summaryLimit(file));
+                if (!sentences.length) continue;
+                const [oldBlob, newBlob] = await Promise.all([blobFor(file, "old"), blobFor(file, "new")]);
+                if ((oldBlob || "") !== item.oldBlob || (newBlob || "") !== item.newBlob) continue;
+                (version.summaries ||= {})[file.id] = { digest: file.digest, sentences };
+            }
             if (clarificationOnly && result.status === "completed") {
                 const missing = uncoveredFiles(snapshot.files, version.clarifications);
                 if (missing.length) {
@@ -661,6 +711,13 @@ class Review {
                     throw new Error("还有 " + missing.length + " 个文件的变更行缺少澄清。"
                         + missing[0].path + " " + (side === "old" ? "旧侧 " : "新侧 ") + line
                         + "。补齐后重新保存回传文件。");
+                }
+                const missingSummary = request.summaryFiles?.find(item => {
+                    const file = filesByPath.get(item.path);
+                    return file && version.summaries?.[file.id]?.digest !== file.digest;
+                });
+                if (missingSummary) {
+                    throw new Error("缺少 " + missingSummary.path + " 的变更摘要。补齐后重新保存回传文件。");
                 }
             }
             (data.receipts ||= {})[request.requestId] = { version: version.number, status: result.status, summary: result.summary, at };
@@ -682,7 +739,6 @@ class Review {
                 }
                 else {
                     this.record = data.versions.find(item => item.number === selected);
-                    this.syncThreads();
                 }
                 this.status = { kind: success ? "success" : "error", text: message };
                 this.files.reset();
@@ -749,7 +805,9 @@ class Review {
             if (message.type === "export") await this.exportRequest(message.directory, message.automation);
             if (message.type === "exportClarifications") await this.exportRequest(message.directory, undefined, "clarifications");
         } else {
-            if (message.type === "reveal") await this.reveal(message.fileId, message.side, message.start, message.end);
+            if (message.type === "reveal" && message.comparison === this.snapshot?.token) {
+                await this.reveal(message.fileId, message.side, message.start, message.end);
+            }
             if (message.type === "opinion") {
                 try {
                     if (message.comparison !== this.snapshot?.token) throw new Error("比较已切换，请重新选择行范围。");
@@ -797,7 +855,6 @@ class Review {
     dispose() {
         clearTimeout(this.refreshTimer);
         this.exports.dispose();
-        this.comments.dispose();
         this.files.dispose();
     }
 }
@@ -806,9 +863,11 @@ function activate(context) {
     const review = new Review(context);
     const register = (command, handler) => vscode.commands.registerCommand(id + "." + command,
         (...args) => review.guard(() => handler(...args)));
+    review.fileTree = vscode.window.createTreeView(id + ".files", { treeDataProvider: review.files, showCollapseAll: true });
+    void vscode.commands.executeCommand("setContext", flatContext, review.files.flat);
     context.subscriptions.push(
         review,
-        vscode.window.registerTreeDataProvider(id + ".files", review.files),
+        review.fileTree,
         vscode.window.registerWebviewViewProvider(id + ".controls", { resolveWebviewView: view => review.bind(view, "controls") }),
         vscode.workspace.registerTextDocumentContentProvider(scheme, { provideTextDocumentContent: uri => review.document(uri) }),
         vscode.window.onDidChangeTextEditorSelection(event => review.selectEditor(event.textEditor, event.selections[0])),
@@ -821,12 +880,14 @@ function activate(context) {
         }),
         register("refresh", () => review.select(review.repository, review.target, review.source)),
         register("openFile", fileId => review.openFile(fileId)),
-        register("selectLines", async () => {
-            review.selectEditor(vscode.window.activeTextEditor);
-            await review.focusDetail(false);
-            review.detail?.webview.postMessage({ type: "focusOpinion" });
-        }),
-        register("addEditorComment", reply => review.addFromEditor(reply)),
+        register("openWorkingFile", node => review.openWorkingFile(node)),
+        register("expandFolders", () => review.expandFolders()),
+        register("showFlatFiles", () => review.setFileLayout(true)),
+        register("showFileTree", () => review.setFileLayout(false)),
+        ...["Name", "Absolute", "Relative"].flatMap(format => [
+            register("copyFile" + format, target => review.copyPath(target, format.toLowerCase())),
+            register("copyFolder" + format, target => review.copyPath(target, format.toLowerCase())),
+        ]),
         register("importClarifications", () => review.importClarifications()),
     );
     return review;

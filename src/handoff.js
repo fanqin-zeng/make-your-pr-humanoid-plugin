@@ -45,6 +45,7 @@ function documentFor(request) {
         "## 执行范围",
         "",
         ...instructions,
+        "按 summaryFiles 为文件撰写变更摘要，简洁说明修改目的。每条数组元素只写一句，最多 maxSentences 句。每个文件的上限是新增行数和删除行数之和除以 500 后向上取整。代码更新后，为本轮改动涉及且仍有文本 diff 的文件补充摘要。",
         "每次结束都写出结果，包括遇到阻塞的情况。在 resultPath 同目录先写入临时文件，然后原子重命名到确切的 resultPath。结果文件必须是 UTF-8 JSON。评阅扩展会自动读取并更新版本，用户无需另行导入。",
         "",
         "## 请求数据",
@@ -60,6 +61,7 @@ function documentFor(request) {
         "- changedPaths 只列本轮实际修改的仓库相对路径，使用正斜杠。重命名填写新旧两个路径。只评阅时使用空数组。",
         "- 每条回复复制请求里的 id 和 revision。handled 表示该意见在自动修改模式下已处理完成，包含已落实、已满足或给出无需改代码的明确答复。",
         "- clarifications 的 path 填写评阅 diff 中的文件路径。旧侧遇到重命名时，path 仍填新路径，从 base 中的旧路径读取内容和 blob。side 为 old 或 new，start/end 是该侧一基的包含端点的行号，blob 为该侧完整文件的 Git blob ID。用 git rev-parse <树或提交>:<文件> 可以得到精确的 blob ID。",
+        "- fileSummaries 每个文件写一项。path 使用 diff 中的文件路径。oldBlob 来自 base，newBlob 来自最终来源快照，缺失的一侧填空字符串。未提交的工作树文件使用 git hash-object --path=<文件> <文件> 取得规范化的 blob ID。sentences 是概括修改目的的句子数组。",
         "",
         fence + "json",
         JSON.stringify({
@@ -69,6 +71,7 @@ function documentFor(request) {
             clarifications: clarificationOnly
                 ? [{ path: "<文件相对路径>", side: "new", blob: "<blob ID>", start: 1, end: 1, text: "<修改原因>" }]
                 : [],
+            fileSummaries: [{ path: "<文件相对路径>", oldBlob: "<旧侧 blob ID>", newBlob: "<新侧 blob ID>", sentences: ["<修改目的>"] }],
         }, null, 2),
         fence,
         "",
@@ -123,6 +126,15 @@ function readResult(raw, request) {
             || !Number.isSafeInteger(point.end) || point.start < 1 || point.end < point.start
             || typeof point.text !== "string" || !point.text.trim() || point.text.length > 16000) {
             throw new Error("回传的修改澄清缺少有效的文件、行号或 Git 对象。");
+        }
+    }
+    if (value.fileSummaries !== undefined) {
+        const validBlob = blob => typeof blob === "string" && (!blob || oidPattern.test(blob));
+        if (!Array.isArray(value.fileSummaries) || value.fileSummaries.some(item => !item || !repositoryPath(item.path)
+            || !validBlob(item.oldBlob) || !validBlob(item.newBlob) || !Array.isArray(item.sentences)
+            || !item.sentences.length || item.sentences.some(sentence => typeof sentence !== "string"
+                || !sentence.trim() || sentence.length > 1000))) {
+            throw new Error("回传的变更摘要缺少有效的文件、Git 对象或句子。");
         }
     }
     return value;

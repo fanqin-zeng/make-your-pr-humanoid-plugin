@@ -125,6 +125,7 @@ async function carry(repository, before, after, prior) {
         opinions, extraFiles,
         read: Object.fromEntries(Object.entries(prior.read).filter(([id]) => kept.has(id))),
         clarifications: Object.fromEntries(Object.entries(prior.clarifications).filter(([id, value]) => kept.get(id) === value.digest)),
+        summaries: Object.fromEntries(Object.entries(prior.summaries || {}).filter(([id, value]) => kept.get(id) === value.digest)),
     };
 }
 
@@ -182,7 +183,7 @@ async function refresh(repository, target, source, stored, storageId) {
 
     const snapshot = await comparison(repository, target, source, range);
     const annotations = previous ? await carry(repository, await load(repository, target, source, previous), snapshot, previous)
-        : { read: {}, clarifications: {}, opinions: [], extraFiles: [] };
+        : { read: {}, clarifications: {}, summaries: {}, opinions: [], extraFiles: [] };
     const restored = stored.versions.slice(0, -1).reverse().find(item =>
         item.range.base === base && item.range.headTree === headTree);
     if (restored) {
@@ -196,6 +197,7 @@ async function refresh(repository, target, source, stored, storageId) {
         }
         annotations.extraFiles = [...new Set([...annotations.extraFiles, ...exact.extraFiles])];
         annotations.clarifications = { ...exact.clarifications, ...annotations.clarifications };
+        annotations.summaries = { ...exact.summaries, ...annotations.summaries };
     }
     const label = number(stored.versions.length);
     const version = { number: label, range, at: new Date().toISOString(), ...annotations };
