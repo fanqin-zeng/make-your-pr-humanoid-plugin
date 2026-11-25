@@ -203,7 +203,7 @@ class Review {
             : this.scanning.includes(remembered?.repository) ? remembered.repository : this.scanning[0]);
     }
 
-    async select(repository, target, source) {
+    async select(repository, target, source, { preserveFocus = false } = {}) {
         if (this.exporting || this.receiving || !this.scanning.includes(repository)) return;
         const request = ++this.pending;
         const previousFile = this.repository === repository ? this.currentFile?.path : null;
@@ -252,7 +252,7 @@ class Review {
             await this.context.workspaceState.update(key, { repository, target: this.target, source: this.source });
             await this.save();
             this.status = { kind: "idle", text: version.number + (snapshot.working ? " · 含未提交修改" : " · 分支快照") };
-            if (previousToken && previousToken !== snapshot.token) await this.reopen(previousToken);
+            if (previousToken && previousToken !== snapshot.token) await this.reopen(previousToken, preserveFocus);
         } catch (error) {
             if (request === this.pending) this.status = { kind: "error", text: "生成比较失败。 " + error.message.slice(0, 350) };
         } finally {
@@ -860,10 +860,11 @@ class Review {
         if (!this.isLatest || this.busy || document.uri.scheme !== "file") return;
         const relative = path.relative(this.repository, document.uri.fsPath);
         if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) return;
+        const comparison = this.storeKey;
         clearTimeout(this.refreshTimer);
         this.refreshTimer = setTimeout(() => {
-            if (this.isLatest && !this.busy) {
-                this.guard(() => this.select(this.repository, this.target, this.source));
+            if (this.isLatest && !this.busy && this.storeKey === comparison) {
+                this.guard(() => this.select(this.repository, this.target, this.source, { preserveFocus: true }));
             }
         }, 550);
     }

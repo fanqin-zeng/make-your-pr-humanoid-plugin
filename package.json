@@ -2,7 +2,7 @@
   "name": "workspace-pr-review",
   "displayName": "Make Your PR Humanoid",
   "description": "在 Qoder 或 VS Code 中评阅 Git 分支、记录行意见并导出评阅任务。",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "publisher": "workspace-tools",
   "repository": {
     "type": "git",
