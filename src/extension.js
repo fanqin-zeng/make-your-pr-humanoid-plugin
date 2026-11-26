@@ -1,6 +1,7 @@
 "use strict";
 
 const { randomUUID } = require("node:crypto");
+const { isDeepStrictEqual } = require("node:util");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
@@ -10,6 +11,7 @@ const changes = require("./changes");
 const versions = require("./versions");
 const { uncoveredFiles, mergePoints, summaryLimit, summarySentences, pendingSummaries } = require("./clarifications");
 const { AllOpinions } = require("./opinions");
+const { ReviewStorage, comparisonKey, importLegacy, reviewDatabase, snapshotKey } = require("./storage");
 
 const id = "workspacePrReview";
 const scheme = "workspace-pr-review";
@@ -19,6 +21,12 @@ const layoutKey = id + ".fileLayout";
 const flatContext = id + ".flatFiles";
 const opinionsViewId = id + ".allOpinions";
 const statusLabels = { A: "新增", C: "复制", D: "删除", M: "修改", R: "重命名", T: "类型变更", U: "行意见" };
+
+function workspaceRoots() {
+    return (vscode.workspace.workspaceFolders || [])
+        .filter(item => item.uri.scheme === "file" || item.uri.scheme === "vscode-remote")
+        .map(item => item.uri.fsPath);
+}
 
 function comparisonId(repository, target, source) {
     return git.digest([repository, target, source].join("\0"));
@@ -106,6 +114,8 @@ class Review {
         this.status = { kind: "idle", text: "选择 Git 仓库以开始评阅" };
         this.snapshots = new Map();
         this.pending = 0;
+        this.storages = new Map();
+        this.sharedTimer = setInterval(() => { void this.guard(() => this.refreshShared()); }, 1500);
         this.exports = new handoff.ResultWatcher(context.workspaceState,
             (job, result) => this.receiveResult(job, result),
             message => vscode.window.showWarningMessage("评阅回传：" + message),
@@ -113,6 +123,24 @@ class Review {
     }
 
     get isLatest() { return Boolean(this.record && this.record === this.data?.versions.at(-1)); }
+
+    async storage(repository) {
+        const roots = workspaceRoots();
+        const identity = JSON.stringify([repository, ...roots.sort()]);
+        if (!this.storages.has(identity)) {
+            const database = await reviewDatabase(repository);
+            if (!this.storages.has(identity)) this.storages.set(identity, new ReviewStorage(roots, database));
+        }
+        return this.storages.get(identity);
+    }
+
+    legacy(repository, target, source, knownKey) {
+        const legacyKey = knownKey || id + ".review." + comparisonId(repository, target, source);
+        const stored = this.context.workspaceState.get(legacyKey);
+        if (stored || !git.originTargets.includes(target)) return stored;
+        const oldTarget = git.retiredTargets[git.originTargets.indexOf(target)];
+        return this.context.workspaceState.get(id + ".review." + comparisonId(repository, oldTarget, source));
+    }
 
     notify() {
         const history = this.data?.versions || [];
@@ -174,9 +202,7 @@ class Review {
         this.loading = true;
         this.status = { kind: "busy", text: "正在扫描工作区的 Git 仓库…" };
         this.notify();
-        const folders = vscode.workspace.workspaceFolders || [];
-        const roots = folders.filter(item => item.uri.scheme === "file" || item.uri.scheme === "vscode-remote")
-            .map(item => item.uri.fsPath);
+        const roots = workspaceRoots();
         try {
             const found = await git.repositories(roots);
             if (request !== this.pending) return;
@@ -233,24 +259,28 @@ class Review {
                 this.status = { kind: "idle", text: "请选择两个不同的分支" };
                 return;
             }
-            const storageId = comparisonId(repository, this.target, this.source);
-            const storeKey = id + ".review." + storageId;
-            let stored = this.context.workspaceState.get(storeKey);
-            if (!stored && git.originTargets.includes(this.target)) {
-                // Reuse the saved history on the first switch to the corresponding origin target.
-                const oldTarget = git.retiredTargets[git.originTargets.indexOf(this.target)];
-                stored = this.context.workspaceState.get(id + ".review." + comparisonId(repository, oldTarget, this.source));
-            }
-            const data = structuredClone(stored || { versions: [] });
-            const { version, snapshot } = await versions.refresh(repository, this.target, this.source, data, storageId);
+            const selected = { repository, target: this.target, source: this.source };
+            const storage = await this.storage(repository);
+            if (request !== this.pending) return;
+            const reviewKey = comparisonKey(repository, selected.target, selected.source);
+            const storeKey = id + ".review." + comparisonId(repository, selected.target, selected.source);
+            const legacy = this.legacy(repository, selected.target, selected.source, storeKey);
+            const state = await storage.change(reviewKey, async stored => {
+                const data = importLegacy(stored, legacy);
+                const result = await versions.refresh(repository, selected.target, selected.source, data);
+                return { data, result };
+            });
             const directory = await this.requestDirectory();
             if (request !== this.pending) return;
+            const { version, snapshot } = state.result;
             this.storeKey = storeKey;
-            this.data = data;
+            this.reviewKey = reviewKey;
+            this.activeStorage = storage;
+            this.sharedRevision = state.revision;
+            this.data = state.data;
             this.exportDirectory = directory;
             this.show(snapshot, version, previousFile);
-            await this.context.workspaceState.update(key, { repository, target: this.target, source: this.source });
-            await this.save();
+            await this.context.workspaceState.update(key, selected);
             this.status = { kind: "idle", text: version.number + (snapshot.working ? " · 含未提交修改" : " · 分支快照") };
             if (previousToken && previousToken !== snapshot.token) await this.reopen(previousToken, preserveFocus);
         } catch (error) {
@@ -290,6 +320,8 @@ class Review {
 
     async selectVersion(number) {
         if (this.busy || !this.snapshot) return;
+        await this.refreshShared();
+        if (this.busy || !this.snapshot) return;
         const version = this.data.versions.find(item => item.number === number);
         if (!version || version === this.record) return;
         if (version === this.data.versions.at(-1)) {
@@ -319,6 +351,8 @@ class Review {
         this.record = null;
         this.currentFile = null;
         this.selection = null;
+        this.activeStorage = null;
+        this.reviewKey = null;
         this.files.reset();
         this.updateAllOpinions();
     }
@@ -443,8 +477,8 @@ class Review {
         const first = file.rows.find(row => side === "new" ? row.new && row.text.startsWith("+") : row.old && row.text.startsWith("-"));
         const line = first?.[side] || file.rows.find(row => row[side])?.[side] || 1;
         this.selection = { fileId: file.id, side, start: line, end: line };
-        this.record.read[file.id] = file.digest;
-        await this.save();
+        await this.updateRecord(record => { record.read[file.id] = file.digest; });
+        if (this.snapshot?.fileMap.get(fileId) !== file) return;
         await vscode.commands.executeCommand("vscode.diff", this.uri(file, "old"), this.uri(file, "new"),
             file.path + " · " + this.record.number + " / PR 基点",
             { viewColumn: vscode.ViewColumn.One, preview: true, preserveFocus });
@@ -512,9 +546,14 @@ class Review {
         if (this.busy) throw new Error("请等评阅状态更新后再保存意见。");
         const file = this.snapshot?.fileMap.get(selection?.fileId);
         const previous = editingId && this.record?.opinions.find(opinion => opinion.id === editingId);
+        if (editingId && !previous) throw new Error("找不到要编辑的意见。");
         if (previous) {
-            previous.text = text.trim();
-            previous.revision = randomUUID();
+            await this.updateRecord(record => {
+                const note = record.opinions.find(opinion => opinion.id === editingId);
+                if (note?.revision !== previous.revision) throw new Error("此条意见已在另一窗口编辑，请重新查看。");
+                note.text = text.trim();
+                note.revision = randomUUID();
+            }, true);
         } else {
             if (!file || !["old", "new"].includes(selection?.side)) throw new Error("请先打开 diff 并选择行范围。");
             const { side, start, end } = selection;
@@ -527,19 +566,66 @@ class Review {
             }
             const last = Math.min(end, start + 24) - 1;
             const excerpt = document.getText(new vscode.Range(start - 1, 0, last, document.lineAt(last).text.length)).slice(0, 3500);
-            this.record.opinions.push({
+            const note = {
                 id: randomUUID(), revision: randomUUID(), path: file.path, fileId: file.id, side, start, end,
                 digest: file.digest, excerpt, text: text.trim(), createdAt: new Date().toISOString(), replies: [],
-            });
+            };
+            await this.updateRecord(record => { record.opinions.push(note); }, true);
         }
-        await this.save();
-        this.updateAllOpinions();
     }
 
-    async save() {
-        await this.context.workspaceState.update(this.storeKey, structuredClone(this.data));
-        this.files.change.fire();
+    async updateRecord(change, latestOnly = false) {
+        const { activeStorage: storage, reviewKey, record } = this;
+        if (!storage || !record) throw new Error("请先生成分支比较。");
+        const updated = await storage.change(reviewKey, data => {
+            const version = data?.versions.find(item => item.number === record.number
+                && snapshotKey(item.range) === snapshotKey(record.range));
+            if (!version || latestOnly && version !== data.versions.at(-1)) {
+                throw new Error("评阅版本已切换，请重新查看最新版本。");
+            }
+            change(version, data);
+            return { data };
+        });
+        if (this.activeStorage === storage && this.reviewKey === reviewKey) await this.adoptShared(updated);
+    }
+
+    async adoptShared(state) {
+        const { activeStorage: storage, reviewKey, record, snapshot: previous } = this;
+        if (!previous || !state.data?.versions?.length || state.revision <= this.sharedRevision) return;
+        const history = state.data.versions;
+        const sameSnapshot = item => snapshotKey(item.range) === snapshotKey(record.range);
+        const version = (this.isLatest ? null
+            : history.find(item => item.number === record.number && sameSnapshot(item)) || history.findLast(sameSnapshot))
+            || history.at(-1);
+        const changed = version.number !== record.number || !isDeepStrictEqual(version.range, record.range)
+            || !isDeepStrictEqual(version.extraFiles, record.extraFiles);
+        const snapshot = changed && await versions.load(previous.repository, previous.target, previous.source, version);
+        if (this.activeStorage !== storage || this.reviewKey !== reviewKey || this.snapshot !== previous
+            || state.revision <= this.sharedRevision) return;
+        this.data = state.data;
+        this.sharedRevision = state.revision;
+        if (changed) {
+            this.show(snapshot, version, this.currentFile?.path);
+            this.status = { kind: "idle", text: version.number + (this.isLatest
+                ? snapshot.working ? " · 含未提交修改" : " · 分支快照" : " · 历史版本") };
+            if (previous.token !== snapshot.token) await this.reopen(previous.token, true);
+        } else {
+            this.record = version;
+            this.updateAllOpinions();
+        }
+        this.files.reset();
         this.notify();
+    }
+
+    async refreshShared() {
+        const { activeStorage: storage, reviewKey } = this;
+        if (!storage || this.busy || this.syncing || storage.revision(reviewKey) === this.sharedRevision) return;
+        this.syncing = true;
+        try {
+            await this.adoptShared(storage.read(reviewKey));
+        } finally {
+            this.syncing = false;
+        }
     }
 
     needsReply(opinion, edit) {
@@ -582,6 +668,8 @@ class Review {
 
     async exportRequest(input, requested, purpose = "review") {
         if (!this.isLatest || this.busy) return;
+        await this.refreshShared();
+        if (!this.isLatest || this.busy) return;
         const { repository, source, target, sourceCommit, head, base, targetCommit } = this.snapshot;
         const clarificationOnly = purpose === "clarifications";
         const actions = changes.automation(clarificationOnly ? undefined : requested);
@@ -623,10 +711,9 @@ class Review {
                 sourceTree: head, actions, pushDestination, opinions, clarificationFiles, summaryFiles,
             });
             await this.exports.add({ ...job, storeKey: this.storeKey, storageId });
-            if (!clarificationOnly) this.data.automation = actions;
+            if (!clarificationOnly) await this.updateRecord((_, data) => { data.automation = actions; });
             await this.context.workspaceState.update(directoryKey, directory);
             this.exportDirectory = directory;
-            await this.save();
             const exported = clarificationOnly
                 ? new Set([...clarificationFiles, ...summaryFiles].map(file => file.path)).size + " 个文件待说明"
                 : opinions.length + " 条意见";
@@ -655,127 +742,121 @@ class Review {
         if (this.busy) return false;
         this.receiving = true;
         try {
-            const { request, storeKey, storageId } = job;
+            const { request, storeKey } = job;
             const { repository, source, target } = request;
             const clarificationOnly = request.purpose === "clarifications";
-            const active = storeKey === this.storeKey && Boolean(this.data);
-            const data = structuredClone(active ? this.data : this.context.workspaceState.get(storeKey));
-            if (data?.receipts?.[request.requestId]) return true;
-            if (!data?.versions.find(version => version.number === request.version)) {
-                throw new Error("找不到导出时的评阅版本。");
-            }
-            const head = await git.resolve(repository, source);
-            if (head !== result.sourceHead) throw new Error("来源分支当前提交与 Agent 回传不一致。");
-            if (result.commit) {
-                const parent = (await git.git(repository, ["rev-parse", head + "^"])).trim();
-                if (parent !== request.sourceHead) throw new Error("Agent 回传的提交须直接基于导出时的来源提交。");
-                const touched = (await git.git(repository, ["diff", "--no-renames", "--name-only", "-z", parent, head, "--"]))
-                    .split("\0").filter(Boolean);
-                const reported = new Set(result.changedPaths);
-                if (touched.some(name => !reported.has(name))) throw new Error("Agent 回传的路径遗漏了本轮提交的文件。");
-            }
-            if (request.actions.edit && head === request.sourceHead && result.changedPaths.length) {
-                await changes.assertHead(repository, source, head);
-                data.workingPaths = [...new Set([...(data.workingPaths || []), ...result.changedPaths])];
-            }
+            const storage = await this.storage(repository);
+            const reviewKey = comparisonKey(repository, target, source);
+            const state = await storage.change(reviewKey, async stored => {
+                const data = importLegacy(stored, this.legacy(repository, target, source, storeKey));
+                if (data.receipts?.[request.requestId]) return { data };
+                const matches = version => version.range.base === request.base
+                    && (version.range.headTree || version.range.head) === request.sourceTree;
+                const versionsForRequest = data.versions || [];
+                const initial = versionsForRequest.find(item => item.number === request.version && matches(item))
+                    || versionsForRequest.findLast(matches);
+                if (!initial) throw new Error("找不到导出时的评阅版本。");
+                const head = await git.resolve(repository, source);
+                if (head !== result.sourceHead) throw new Error("来源分支当前提交与 Agent 回传不一致。");
+                if (result.commit) {
+                    const parent = (await git.git(repository, ["rev-parse", head + "^"])).trim();
+                    if (parent !== request.sourceHead) throw new Error("Agent 回传的提交须直接基于导出时的来源提交。");
+                    const touched = (await git.git(repository, ["diff", "--no-renames", "--name-only", "-z", parent, head, "--"]))
+                        .split("\0").filter(Boolean);
+                    const reported = new Set(result.changedPaths);
+                    if (touched.some(name => !reported.has(name))) throw new Error("Agent 回传的路径遗漏了本轮提交的文件。");
+                }
+                if (request.actions.edit && head === request.sourceHead && result.changedPaths.length) {
+                    await changes.assertHead(repository, source, head);
+                    data.workingPaths = [...new Set([...(data.workingPaths || []), ...result.changedPaths])];
+                }
 
-            const replies = new Map(result.replies.map(reply => [reply.id, reply]));
-            const at = new Date().toISOString();
-            for (const revision of data.versions) {
-                if (Number(revision.number.slice(1)) < Number(request.version.slice(1))) continue;
-                for (const note of revision.opinions) {
-                    const reply = replies.get(note.id);
-                    if (reply?.revision !== note.revision) continue;
-                    note.replies.push({ requestId: request.requestId, revision: note.revision, text: reply.text, at });
-                    if (request.actions.edit && reply.handled) note.editRevision = note.revision;
+                const replies = new Map(result.replies.map(reply => [reply.id, reply]));
+                const at = new Date().toISOString();
+                for (const revision of data.versions.slice(data.versions.indexOf(initial))) {
+                    for (const note of revision.opinions) {
+                        const reply = replies.get(note.id);
+                        if (reply?.revision !== note.revision) continue;
+                        note.replies.push({ requestId: request.requestId, revision: note.revision, text: reply.text, at });
+                        if (request.actions.edit && reply.handled) note.editRevision = note.revision;
+                    }
                 }
-            }
-            const { version, snapshot } = await versions.refresh(repository, target, source, data, storageId);
-            if (clarificationOnly && (result.status !== "blocked" || result.clarifications.length)
-                && (snapshot.base !== request.base || snapshot.head !== request.sourceTree
-                    || snapshot.sourceCommit !== request.sourceHead)) {
-                throw new Error("导出时的快照已变化。请刷新比较并重新导出修改澄清需求。");
-            }
-            const clarifications = new Map();
-            const filesByPath = new Map(snapshot.files.map(file => [file.path, file]));
-            const cachedBlobs = new Map();
-            const blobFor = (file, side) => {
-                const name = side === "old" ? file.oldPath || file.path : file.path;
-                const object = side === "old" ? snapshot.base : snapshot.head;
-                const key = object + "\0" + name;
-                if (!cachedBlobs.has(key)) cachedBlobs.set(key, versions.blobId(repository, object, name));
-                return cachedBlobs.get(key);
-            };
-            const cachedLengths = new Map();
-            for (const point of result.clarifications) {
-                const file = filesByPath.get(point.path);
-                if (!file) continue;
-                const blob = await blobFor(file, point.side);
-                if (blob !== point.blob) continue;
-                if (!cachedLengths.has(blob)) {
-                    cachedLengths.set(blob, (await git.blob(snapshot, file, point.side)).split("\n").length);
+                const { version, snapshot } = await versions.refresh(repository, target, source, data);
+                if (clarificationOnly && (result.status !== "blocked" || result.clarifications.length)
+                    && (snapshot.base !== request.base || snapshot.head !== request.sourceTree
+                        || snapshot.sourceCommit !== request.sourceHead)) {
+                    throw new Error("导出时的快照已变化。请刷新比较并重新导出修改澄清需求。");
                 }
-                if (point.end > cachedLengths.get(blob)) continue;
-                if (!clarifications.has(file.id)) clarifications.set(file.id, { digest: file.digest, points: [] });
-                const { side, start, end, text } = point;
-                clarifications.get(file.id).points.push({ side, start, end, text });
-            }
-            for (const [fileId, value] of clarifications) {
-                const previous = version.clarifications[fileId];
-                if (clarificationOnly && previous?.digest === value.digest) {
-                    value.points = mergePoints(previous.points, value.points);
+                const clarifications = new Map();
+                const filesByPath = new Map(snapshot.files.map(file => [file.path, file]));
+                const cachedBlobs = new Map();
+                const blobFor = (file, side) => {
+                    const name = side === "old" ? file.oldPath || file.path : file.path;
+                    const object = side === "old" ? snapshot.base : snapshot.head;
+                    const key = object + "\0" + name;
+                    if (!cachedBlobs.has(key)) cachedBlobs.set(key, versions.blobId(repository, object, name));
+                    return cachedBlobs.get(key);
+                };
+                const cachedLengths = new Map();
+                for (const point of result.clarifications) {
+                    const file = filesByPath.get(point.path);
+                    if (!file) continue;
+                    const blob = await blobFor(file, point.side);
+                    if (blob !== point.blob) continue;
+                    if (!cachedLengths.has(blob)) {
+                        cachedLengths.set(blob, (await git.blob(snapshot, file, point.side)).split("\n").length);
+                    }
+                    if (point.end > cachedLengths.get(blob)) continue;
+                    if (!clarifications.has(file.id)) clarifications.set(file.id, { digest: file.digest, points: [] });
+                    const { side, start, end, text } = point;
+                    clarifications.get(file.id).points.push({ side, start, end, text });
                 }
-                version.clarifications[fileId] = value;
-            }
-            for (const item of result.fileSummaries || []) {
-                const file = filesByPath.get(item.path);
-                if (!file) continue;
-                const sentences = summarySentences(item.sentences, summaryLimit(file));
-                if (!sentences.length) continue;
-                const [oldBlob, newBlob] = await Promise.all([blobFor(file, "old"), blobFor(file, "new")]);
-                if ((oldBlob || "") !== item.oldBlob || (newBlob || "") !== item.newBlob) continue;
-                (version.summaries ||= {})[file.id] = { digest: file.digest, sentences };
-            }
-            if (clarificationOnly && result.status === "completed") {
-                const missing = uncoveredFiles(snapshot.files, version.clarifications);
-                if (missing.length) {
-                    const [{ side, start, end }] = missing[0].ranges;
-                    const line = start === end ? "L" + start : "L" + start + "–" + end;
-                    throw new Error("还有 " + missing.length + " 个文件的变更行缺少澄清。"
-                        + missing[0].path + " " + (side === "old" ? "旧侧 " : "新侧 ") + line
-                        + "。补齐后重新保存回传文件。");
+                for (const [fileId, value] of clarifications) {
+                    const previous = version.clarifications[fileId];
+                    if (clarificationOnly && previous?.digest === value.digest) {
+                        value.points = mergePoints(previous.points, value.points);
+                    }
+                    version.clarifications[fileId] = value;
                 }
-                const missingSummary = request.summaryFiles?.find(item => {
+                for (const item of result.fileSummaries || []) {
                     const file = filesByPath.get(item.path);
-                    return file && version.summaries?.[file.id]?.digest !== file.digest;
-                });
-                if (missingSummary) {
-                    throw new Error("缺少 " + missingSummary.path + " 的变更摘要。补齐后重新保存回传文件。");
+                    if (!file) continue;
+                    const sentences = summarySentences(item.sentences, summaryLimit(file));
+                    if (!sentences.length) continue;
+                    const [oldBlob, newBlob] = await Promise.all([blobFor(file, "old"), blobFor(file, "new")]);
+                    if ((oldBlob || "") !== item.oldBlob || (newBlob || "") !== item.newBlob) continue;
+                    (version.summaries ||= {})[file.id] = { digest: file.digest, sentences };
                 }
-            }
-            (data.receipts ||= {})[request.requestId] = { version: version.number, status: result.status, summary: result.summary, at };
-            await this.context.workspaceState.update(storeKey, data);
+                if (clarificationOnly && result.status === "completed") {
+                    const missing = uncoveredFiles(snapshot.files, version.clarifications);
+                    if (missing.length) {
+                        const [{ side, start, end }] = missing[0].ranges;
+                        const line = start === end ? "L" + start : "L" + start + "–" + end;
+                        throw new Error("还有 " + missing.length + " 个文件的变更行缺少澄清。"
+                            + missing[0].path + " " + (side === "old" ? "旧侧 " : "新侧 ") + line
+                            + "。补齐后重新保存回传文件。");
+                    }
+                    const missingSummary = request.summaryFiles?.find(item => {
+                        const file = filesByPath.get(item.path);
+                        return file && version.summaries?.[file.id]?.digest !== file.digest;
+                    });
+                    if (missingSummary) {
+                        throw new Error("缺少 " + missingSummary.path + " 的变更摘要。补齐后重新保存回传文件。");
+                    }
+                }
+                (data.receipts ||= {})[request.requestId] = { version: version.number, status: result.status, summary: result.summary, at };
+                return { data, result: version };
+            });
+            const version = state.result;
+            if (!version) return true;
+            const active = this.activeStorage === storage && this.reviewKey === reviewKey;
             const success = result.status === "completed";
             const task = clarificationOnly ? "修改澄清" : "评阅";
             const message = task + (success ? "完成 · " : result.status === "partial" ? "部分完成 · " : "受阻 · ")
                 + version.number + " · " + result.summary.slice(0, 160);
             if (active) {
-                const wasLatest = this.isLatest;
-                const selected = this.record?.number;
-                const previousToken = this.snapshot?.token;
-                this.data = data;
-                if (wasLatest) {
-                    this.show(snapshot, version, this.currentFile?.path);
-                    if (previousToken !== snapshot.token) {
-                        await this.guard(() => this.reopen(previousToken, true));
-                    }
-                }
-                else {
-                    this.record = data.versions.find(item => item.number === selected);
-                    this.updateAllOpinions();
-                }
+                await this.adoptShared(state);
                 this.status = { kind: success ? "success" : "error", text: message };
-                this.files.reset();
             }
             const toast = success ? vscode.window.showInformationMessage : vscode.window.showWarningMessage;
             void toast(message, "查看版本").then(choice => {
@@ -805,20 +886,21 @@ class Review {
             || data.head !== snapshot.head && (snapshot.working || data.head !== snapshot.sourceCommit)) {
             throw new Error("澄清文件的合并基点和源提交必须与当前比较一致。");
         }
-        for (const file of snapshot.files) {
-            const points = data.files?.[file.path];
-            if (!Array.isArray(points)) continue;
-            this.record.clarifications[file.id] = {
-                digest: file.digest,
-                points: points.flatMap(point => {
-                    if (!["new", "old"].includes(point.side) || typeof point.reason !== "string" || !Array.isArray(point.ranges)) return [];
-                    const ranges = point.ranges.length ? point.ranges : [{ start: 0, end: 0 }];
-                    return ranges.filter(range => Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end)
-                        && range.start >= 0 && range.end >= range.start).map(range => ({ ...range, side: point.side, text: point.reason }));
-                }),
-            };
-        }
-        await this.save();
+        await this.updateRecord(record => {
+            for (const file of snapshot.files) {
+                const points = data.files?.[file.path];
+                if (!Array.isArray(points)) continue;
+                record.clarifications[file.id] = {
+                    digest: file.digest,
+                    points: points.flatMap(point => {
+                        if (!["new", "old"].includes(point.side) || typeof point.reason !== "string" || !Array.isArray(point.ranges)) return [];
+                        const ranges = point.ranges.length ? point.ranges : [{ start: 0, end: 0 }];
+                        return ranges.filter(range => Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end)
+                            && range.start >= 0 && range.end >= range.start).map(range => ({ ...range, side: point.side, text: point.reason }));
+                    }),
+                };
+            }
+        });
     }
 
     async message(message, panel) {
@@ -833,8 +915,7 @@ class Review {
             if (message.type === "version") await this.selectVersion(message.version);
             if (message.type === "refresh") await this.select(this.repository, this.target, this.source);
             if (message.type === "automation" && this.isLatest && !this.busy) {
-                this.data.automation = changes.automation(message.automation);
-                await this.save();
+                await this.updateRecord((_, data) => { data.automation = changes.automation(message.automation); }, true);
             }
             if (message.type === "browseDirectory") await this.browseDirectory(message.directory);
             if (message.type === "export") await this.exportRequest(message.directory, message.automation);
@@ -894,7 +975,9 @@ class Review {
 
     dispose() {
         clearTimeout(this.refreshTimer);
+        clearInterval(this.sharedTimer);
         this.exports.dispose();
+        for (const storage of this.storages.values()) storage.dispose();
         this.files.dispose();
         this.allOpinions.dispose();
     }

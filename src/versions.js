@@ -129,10 +129,10 @@ async function carry(repository, before, after, prior) {
     };
 }
 
-async function pin(repository, storageId, version, range) {
-    const prefix = "refs/workspace-pr-review/" + storageId + "/" + version;
-    await git(repository, ["update-ref", prefix + "/source", range.head]);
-    await git(repository, ["update-ref", prefix + "/target", range.base]);
+async function pin(repository, range) {
+    for (const commit of new Set([range.head, range.base])) {
+        await git(repository, ["update-ref", "refs/workspace-pr-review/objects/" + commit, commit]);
+    }
 }
 
 async function currentRange(repository, target, source, stored) {
@@ -150,7 +150,7 @@ async function currentRange(repository, target, source, stored) {
     };
 }
 
-async function refresh(repository, target, source, stored, storageId) {
+async function refresh(repository, target, source, stored) {
     if (!stored.versions) {
         stored.versions = [];
         if (Object.keys(stored.read || {}).length || Object.keys(stored.clarifications || {}).length || stored.opinions?.length) {
@@ -160,7 +160,7 @@ async function refresh(repository, target, source, stored, storageId) {
                 targetCommit: previous.targetCommit, base: previous.base, head: previous.head,
                 headTree: await resolve(repository, previous.head, "tree"), sourceCommit: previous.head, working: false, legacy: true,
             };
-            await pin(repository, storageId, label, range);
+            await pin(repository, range);
             stored.versions.push({
                 number: label, range, at: new Date().toISOString(),
                 read: stored.read || {}, clarifications: stored.clarifications || {}, opinions: stored.opinions || [],
@@ -201,7 +201,7 @@ async function refresh(repository, target, source, stored, storageId) {
     }
     const label = number(stored.versions.length);
     const version = { number: label, range, at: new Date().toISOString(), ...annotations };
-    await pin(repository, storageId, label, range);
+    await pin(repository, range);
     stored.versions.push(version);
     return { version, snapshot };
 }
