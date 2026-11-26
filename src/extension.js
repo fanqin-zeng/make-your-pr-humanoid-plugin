@@ -637,8 +637,9 @@ class Review {
     async requestDirectory(input) {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || this.repository || this.context.storageUri?.fsPath;
         const isQoder = /^qoder(?:-|$)/i.test(vscode.env.uriScheme);
-        const names = isQoder ? [".qoder-review", ".vscode-review"] : [".vscode-review", ".qoder-review"];
-        const locations = names.map(name => path.join(root, name, "requests"));
+        const vscodeDirectory = path.join(root, ".vscode-review", "requests");
+        const qoderDirectory = path.join(root, ".qoder-review", "requests");
+        const locations = [vscodeDirectory, qoderDirectory];
         const compare = value => process.platform === "win32" ? value.toLowerCase() : value;
         const value = typeof input === "string" ? input.trim() : undefined;
         const typed = value && path.resolve(root, value);
@@ -650,7 +651,7 @@ class Review {
             const folder = await fs.stat(path.dirname(location)).catch(() => null);
             if (folder?.isDirectory()) return location;
         }
-        return locations[0];
+        return isQoder ? qoderDirectory : vscodeDirectory;
     }
 
     async browseDirectory(input) {

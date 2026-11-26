@@ -36,7 +36,7 @@ Agent 回传的变更摘要说明文件的修改目的。每个文件的摘要�
 
 两个导出入口都提供「打开文件夹」和「复制文件目录」。复制的是 Markdown 文件所在的目录。
 
-默认复用工作区里已有的 `.qoder-review/requests/` 或 `.vscode-review/requests/`。两个目录都存在时优先使用当前编辑器对应的目录。首次导出时，Qoder 创建 `.qoder-review/requests/`，VS Code 创建 `.vscode-review/requests/`。也可以在保存目录栏指定其他位置。
+默认复用工作区里已有的评阅目录。两种目录同时存在时，优先使用 `.vscode-review/requests/`。工作区没有评阅目录时，VS Code 首次导出会创建 `.vscode-review/requests/`，Qoder 会创建 `.qoder-review/requests/`。也可以在保存目录栏指定其他位置。
 
 扩展按工作区、仓库和分支组合保存记录。「导入 HTML 评阅的修改澄清」命令可以复用 Git 快照相同的 `*.clarifications.json` 文件。
 
