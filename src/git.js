@@ -1,7 +1,7 @@
 "use strict";
 
 const { execFile } = require("node:child_process");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { promisify } = require("node:util");
@@ -12,7 +12,8 @@ const skipped = new Set([
     ".tox", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".git", "venv", "envs",
 ]);
 const originTargets = ["refs/remotes/origin/main", "refs/remotes/origin/master"];
-const retiredTargets = ["refs/remotes/upstream/main", "refs/remotes/upstream/master"];
+const upstreamTargets = ["refs/remotes/upstream/main", "refs/remotes/upstream/master"];
+const upstreamHead = "refs/remotes/upstream/HEAD";
 let executable;
 
 function digest(text) {
@@ -87,19 +88,87 @@ async function repositories(roots) {
 }
 
 async function branches(repository) {
-    const [listing, current] = await Promise.all([
+    const [listing, current, remotes] = await Promise.all([
         git(repository, ["for-each-ref", "--format=%(refname)%09%(symref)", "refs/heads", "refs/remotes"]),
         git(repository, ["symbolic-ref", "-q", "HEAD"]).catch(() => ""),
+        git(repository, ["remote"]),
     ]);
-    const refs = listing.trim().split("\n").map(line => line.trimEnd().split("\t"))
-        .filter(([id, symref]) => id && !symref && !retiredTargets.includes(id))
+    const entries = listing.trim().split("\n").map(line => line.trimEnd().split("\t"));
+    const refs = entries
+        .filter(([id, symref]) => id && !symref)
         .map(([id]) => ({ id, label: id.replace(/^refs\/(heads|remotes)\//, "") }));
+    const remoteHead = entries.find(([id]) => id === upstreamHead)?.[1];
+    const defaults = [remoteHead?.startsWith("refs/remotes/upstream/") ? remoteHead : null, ...upstreamTargets, ...originTargets];
     if (!current.trim()) refs.unshift({ id: "HEAD", label: "HEAD（分离）" });
     return {
         refs,
         source: current.trim() || "HEAD",
-        defaultTargets: originTargets.filter(id => refs.some(ref => ref.id === id)),
+        defaultTargets: [...new Set(defaults)].filter(id => refs.some(ref => ref.id === id)),
+        hasUpstream: remotes.split(/\r?\n/).includes("upstream"),
     };
+}
+
+async function conflictFiles(repository, source, commit) {
+    try {
+        await git(repository, ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", source, commit]);
+        return null;
+    } catch (error) {
+        if (error.code !== 1) throw error;
+        return error.stdout.split("\0").slice(1).filter(Boolean);
+    }
+}
+
+async function safeUpstream(repository, source, tip) {
+    const files = await conflictFiles(repository, source, tip);
+    if (!files) return { commit: tip };
+
+    let blocked = { commit: tip, files };
+    const commits = (await git(repository, ["rev-list", "--first-parent", tip, "--not", source])).trim().split(/\r?\n/);
+    for (const commit of commits.slice(1)) {
+        const conflicts = await conflictFiles(repository, source, commit);
+        if (!conflicts) return { commit, blocked };
+        blocked = { commit, files: conflicts };
+    }
+    // The next first parent, when present, is already in the source history.
+    const boundary = await git(repository, ["rev-parse", "--verify", "--quiet",
+        "--end-of-options", commits.at(-1) + "^1"]).catch(error => {
+        if (error.code !== 1) throw error;
+        return "";
+    });
+    if (!boundary.trim()) throw new Error("上游主分支的第一父提交链上找不到可无冲突比较的提交。");
+    return { commit: boundary.trim(), blocked };
+}
+
+async function updateUpstream(repository, source) {
+    const sourceCommit = await resolve(repository, source);
+    const head = await git(repository, ["ls-remote", "--symref", "upstream", "HEAD"]);
+    const branch = head.match(/^ref: (refs\/heads\/[^\t\r\n]+)\tHEAD\r?$/m)?.[1];
+    if (!branch) throw new Error("无法识别 upstream 远端的默认分支。");
+    const target = "refs/remotes/upstream/" + branch.slice("refs/heads/".length);
+    if (source === target) throw new Error("当前来源就是上游主分支，请先选择其他来源分支。");
+    const old = await git(repository, ["rev-parse", "--verify", "--quiet", "--end-of-options", target]).catch(error => {
+        if (error.code !== 1) throw error;
+        return "";
+    });
+    const fetched = "refs/workspace-pr-review/fetch/" + randomUUID();
+    try {
+        await git(repository, ["fetch", "--no-tags", "--no-prune", "--no-recurse-submodules",
+            "--no-write-fetch-head", "--refmap=", "upstream", branch + ":" + fetched]);
+        const tip = await resolve(repository, fetched);
+        const { commit, blocked } = await safeUpstream(repository, sourceCommit, tip);
+        if (await resolve(repository, source) !== sourceCommit) {
+            throw new Error("来源分支在检查期间发生了变化，请重新拉取上游更新。");
+        }
+        if (blocked) {
+            await git(repository, ["update-ref", "refs/workspace-pr-review/objects/" + blocked.commit, blocked.commit]);
+        }
+        await git(repository, ["update-ref", "--no-deref", "-m", "workspace-pr-review: update upstream",
+            target, commit, old.trim() || "0".repeat(tip.length)]);
+        await git(repository, ["symbolic-ref", upstreamHead, target]);
+        return { target, commit, tip, blocked };
+    } finally {
+        await git(repository, ["update-ref", "-d", fetched]);
+    }
 }
 
 function namedChanges(raw) {
@@ -178,5 +247,5 @@ async function blob(snapshot, file, side) {
     return git(snapshot.repository, ["show", "--no-ext-diff", "--no-textconv", commit + ":" + name]);
 }
 
-module.exports = { git, repositories, branches, compare, resolve, comparison, renamedPaths, blob, digest,
-    originTargets, retiredTargets };
+module.exports = { git, repositories, branches, updateUpstream, compare, resolve, comparison, renamedPaths, blob, digest,
+    originTargets, upstreamTargets };

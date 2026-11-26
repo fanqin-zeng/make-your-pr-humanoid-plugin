@@ -30,6 +30,7 @@ window.addEventListener("message", event => {
     fill(get("source"), state.refs, state.source, "选择来源分支");
     fill(get("version"), state.versions, state.version, "暂无版本");
     for (const id of ["repository", "target", "source", "version", "discover", "refresh"]) get(id).disabled = state.busy;
+    get("update-upstream").disabled = state.busy || !state.canUpdateUpstream;
     const directory = get("directory");
     if (document.activeElement !== directory && directory.dataset.saved !== state.directory) {
         directory.value = state.directory;
@@ -56,16 +57,17 @@ window.addEventListener("message", event => {
     }
 });
 
-function select(repository, target, source) {
-    host.postMessage({ type: "select", repository, target, source });
+function select(repository, target, source, targetExplicit) {
+    host.postMessage({ type: "select", repository, target, source, targetExplicit });
 }
 
 get("repository").addEventListener("change", event => select(event.target.value));
-get("target").addEventListener("change", event => select(state.repository, event.target.value, state.source));
+get("target").addEventListener("change", event => select(state.repository, event.target.value, state.source, true));
 get("source").addEventListener("change", event => select(state.repository, state.target, event.target.value));
 get("version").addEventListener("change", event => host.postMessage({ type: "version", version: event.target.value }));
 get("discover").onclick = () => host.postMessage({ type: "discover" });
 get("refresh").onclick = () => host.postMessage({ type: "refresh" });
+get("update-upstream").onclick = () => host.postMessage({ type: "updateUpstream" });
 for (const [index, field] of automationFields.entries()) {
     get("auto-" + field).addEventListener("change", event => {
         const checked = event.target.checked;

@@ -26,6 +26,7 @@ button:disabled { opacity: .55; cursor: default; }
 .automation input { margin: 0; accent-color: var(--vscode-button-background); }
 .status[data-kind=busy] { color: var(--vscode-progressBar-background); }
 .status[data-kind=error] { color: var(--vscode-errorForeground); }
+.status[data-kind=warning] { color: var(--vscode-editorWarning-foreground); }
 .status[data-kind=success] { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
 .meta { font-size: .91em; overflow-wrap: anywhere; }
 #comparison { margin: 2px 0; }

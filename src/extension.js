@@ -138,8 +138,8 @@ class Review {
         const legacyKey = knownKey || id + ".review." + comparisonId(repository, target, source);
         const stored = this.context.workspaceState.get(legacyKey);
         if (stored || !git.originTargets.includes(target)) return stored;
-        const oldTarget = git.retiredTargets[git.originTargets.indexOf(target)];
-        return this.context.workspaceState.get(id + ".review." + comparisonId(repository, oldTarget, source));
+        const upstreamTarget = git.upstreamTargets[git.originTargets.indexOf(target)];
+        return this.context.workspaceState.get(id + ".review." + comparisonId(repository, upstreamTarget, source));
     }
 
     notify() {
@@ -157,6 +157,7 @@ class Review {
             waiting: Object.values(this.exports.pending).filter(job => job.storeKey === this.storeKey).length,
             automation: changes.automation(this.data?.automation),
             busy: this.busy,
+            canUpdateUpstream: Boolean(this.hasUpstream && this.source),
             comparison: this.snapshot && {
                 target: this.snapshot.targetCommit.slice(0, 7), base: this.snapshot.base.slice(0, 7),
                 head: this.snapshot.sourceCommit.slice(0, 7), working: this.snapshot.working, count: this.snapshot.files.length,
@@ -229,12 +230,13 @@ class Review {
             : this.scanning.includes(remembered?.repository) ? remembered.repository : this.scanning[0]);
     }
 
-    async select(repository, target, source, { preserveFocus = false } = {}) {
-        if (this.exporting || this.receiving || !this.scanning.includes(repository)) return;
+    async select(repository, target, source, { preserveFocus = false, targetExplicit } = {}) {
+        if (this.exporting || this.receiving || this.updatingUpstream || !this.scanning.includes(repository)) return;
         const request = ++this.pending;
         const previousFile = this.repository === repository ? this.currentFile?.path : null;
         const previousToken = this.snapshot?.token;
         this.repository = repository;
+        this.hasUpstream = false;
         this.loading = true;
         this.status = { kind: "busy", text: "正在生成分支比较…" };
         this.clear();
@@ -243,16 +245,19 @@ class Review {
             const choices = await git.branches(repository);
             if (request !== this.pending) return;
             this.refs = choices.refs;
+            this.hasUpstream = choices.hasUpstream;
             const remembered = this.context.workspaceState.get(key);
-            if (remembered?.repository === repository) {
-                target ||= remembered.target;
-                source ||= remembered.source;
-            }
+            const previous = remembered?.repository === repository ? remembered : undefined;
+            const previousExplicit = previous?.targetExplicit
+                ?? Boolean(previous?.target && !git.originTargets.includes(previous.target));
+            const explicit = targetExplicit ?? (target && target !== previous?.target ? true : previousExplicit);
+            target ||= explicit ? previous?.target : undefined;
+            source ||= previous?.source;
             this.source = this.refs.some(ref => ref.id === source) ? source : choices.source;
             this.target = this.refs.some(ref => ref.id === target) ? target
                 : choices.defaultTargets.find(ref => ref !== this.source);
             if (!this.target) {
-                this.status = { kind: "idle", text: "请选择目标分支。默认使用本地已有的 origin/main 或 origin/master。" };
+                this.status = { kind: "idle", text: "请选择目标分支。默认优先使用本地已有的 upstream 主分支。" };
                 return;
             }
             if (!this.source || this.source === this.target) {
@@ -280,7 +285,7 @@ class Review {
             this.data = state.data;
             this.exportDirectory = directory;
             this.show(snapshot, version, previousFile);
-            await this.context.workspaceState.update(key, selected);
+            await this.context.workspaceState.update(key, { ...selected, targetExplicit: explicit && selected.target === target });
             this.status = { kind: "idle", text: version.number + (snapshot.working ? " · 含未提交修改" : " · 分支快照") };
             if (previousToken && previousToken !== snapshot.token) await this.reopen(previousToken, preserveFocus);
         } catch (error) {
@@ -292,6 +297,40 @@ class Review {
                 this.notify();
             }
         }
+    }
+
+    async updateUpstream() {
+        const { repository, source } = this;
+        if (this.busy || !this.hasUpstream || !repository || !source) return;
+        this.updatingUpstream = true;
+        this.status = { kind: "busy", text: "正在拉取并检查上游主分支…" };
+        this.notify();
+        let update;
+        try {
+            update = await git.updateUpstream(repository, source);
+        } catch (error) {
+            this.status = { kind: "error", text: "拉取上游更新失败。 " + (error.stderr?.trim() || error.message).slice(0, 350) };
+        } finally {
+            this.updatingUpstream = false;
+            this.notify();
+        }
+        if (!update) return;
+
+        const { target, commit, blocked } = update;
+        await this.select(repository, target, source, { preserveFocus: true, targetExplicit: false });
+        if (!blocked) {
+            if (this.status.kind !== "error") this.status = { kind: "success", text: "上游评阅目标已更新至 " + commit.slice(0, 12) + "。" };
+        } else {
+            const location = blocked.files.length ? "冲突文件：" + blocked.files.join("、") + "。" : "";
+            const message = "上游评阅目标停在 " + commit.slice(0, 12) + "。提交 " + blocked.commit.slice(0, 12)
+                + " 与来源分支冲突。" + location + "请在来源分支解决冲突后再拉取。";
+            if (this.status.kind !== "error") this.status = { kind: "warning", text: message };
+            const copy = "复制冲突提交";
+            void vscode.window.showWarningMessage(message, copy).then(action => {
+                if (action === copy) return vscode.env.clipboard.writeText(blocked.commit);
+            });
+        }
+        this.notify();
     }
 
     show(snapshot, version, filePath) {
@@ -318,13 +357,13 @@ class Review {
         }
     }
 
-    async selectVersion(number) {
+    async selectVersion(number, { refreshLatest = true } = {}) {
         if (this.busy || !this.snapshot) return;
         await this.refreshShared();
         if (this.busy || !this.snapshot) return;
         const version = this.data.versions.find(item => item.number === number);
         if (!version || version === this.record) return;
-        if (version === this.data.versions.at(-1)) {
+        if (refreshLatest && version === this.data.versions.at(-1)) {
             await this.select(this.repository, this.target, this.source);
             await this.showAllOpinions();
             return;
@@ -335,7 +374,7 @@ class Review {
             const previousToken = this.snapshot.token;
             const snapshot = await versions.load(this.repository, this.target, this.source, version);
             this.show(snapshot, version, this.currentFile?.path);
-            this.status = { kind: "idle", text: "历史版本 " + version.number };
+            this.status = { kind: "idle", text: this.isLatest ? version.number + " · 当前快照" : "历史版本 " + version.number };
             await this.reopen(previousToken);
         } finally {
             this.loading = false;
@@ -359,18 +398,28 @@ class Review {
 
     updateAllOpinions() {
         this.allOpinions.refresh();
-        const count = this.record?.opinions.length || 0;
-        this.opinionsView.description = this.record ? this.record.number + " · " + count + " 条" : undefined;
-        this.opinionsView.message = count ? undefined
-            : this.record ? "当前评阅版本没有评论。" : "在左侧选择仓库和分支。";
+        const count = this.data?.versions.length || 0;
+        this.opinionsView.description = count ? count + " 个版本" : undefined;
+        this.opinionsView.message = count ? undefined : "在左侧选择仓库和分支。";
     }
 
     async showAllOpinions(preserveFocus = true) {
         await vscode.commands.executeCommand(opinionsViewId + ".focus", { preserveFocus });
     }
 
-    async revealOpinion(token, opinionId) {
-        if (!this.snapshot || token !== this.snapshot.token) return;
+    async expandAllOpinions() {
+        const roots = this.allOpinions.getChildren();
+        for (const version of roots.toReversed()) {
+            if (roots !== this.allOpinions.getChildren()) return;
+            if (!version.children.length) continue;
+            await this.opinionsView.reveal(version, { expand: 3, select: false, focus: false });
+        }
+    }
+
+    async revealOpinion(reviewKey, number, opinionId) {
+        if (this.busy || !this.snapshot || reviewKey !== this.reviewKey) return;
+        await this.selectVersion(number, { refreshLatest: false });
+        if (this.busy || reviewKey !== this.reviewKey || this.record?.number !== number) return;
         const opinion = this.record.opinions.find(item => item.id === opinionId);
         if (!opinion) return;
         const file = this.fileFor(opinion);
@@ -632,7 +681,7 @@ class Review {
         return opinion.replies.at(-1)?.revision !== opinion.revision || (edit && opinion.editRevision !== opinion.revision);
     }
 
-    get busy() { return Boolean(this.loading || this.exporting || this.receiving); }
+    get busy() { return Boolean(this.loading || this.exporting || this.receiving || this.updatingUpstream); }
 
     async requestDirectory(input) {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || this.repository || this.context.storageUri?.fsPath;
@@ -912,9 +961,11 @@ class Review {
             if (panel === "controls" && this.controls?.visible) await this.showAllOpinions();
         } else if (panel === "controls") {
             if (message.type === "discover") await this.discover();
-            if (message.type === "select") await this.select(message.repository, message.target, message.source);
+            if (message.type === "select") await this.select(message.repository, message.target, message.source,
+                { targetExplicit: message.targetExplicit === true ? true : undefined });
             if (message.type === "version") await this.selectVersion(message.version);
             if (message.type === "refresh") await this.select(this.repository, this.target, this.source);
+            if (message.type === "updateUpstream") await this.updateUpstream();
             if (message.type === "automation" && this.isLatest && !this.busy) {
                 await this.updateRecord((_, data) => { data.automation = changes.automation(message.automation); }, true);
             }
@@ -989,7 +1040,8 @@ function activate(context) {
     const register = (command, handler) => vscode.commands.registerCommand(id + "." + command,
         (...args) => review.guard(() => handler(...args)));
     review.fileTree = vscode.window.createTreeView(id + ".files", { treeDataProvider: review.files, showCollapseAll: true });
-    review.opinionsView = vscode.window.createTreeView(opinionsViewId, { treeDataProvider: review.allOpinions });
+    review.opinionsView = vscode.window.createTreeView(opinionsViewId,
+        { treeDataProvider: review.allOpinions, showCollapseAll: true });
     review.updateAllOpinions();
     void vscode.commands.executeCommand("setContext", flatContext, review.files.flat);
     context.subscriptions.push(
@@ -1008,7 +1060,8 @@ function activate(context) {
             await review.showAllOpinions();
         }),
         register("showAllOpinions", () => review.showAllOpinions(false)),
-        register("revealOpinion", (token, opinionId) => review.revealOpinion(token, opinionId)),
+        register("expandAllOpinions", () => review.expandAllOpinions()),
+        register("revealOpinion", (reviewKey, number, opinionId) => review.revealOpinion(reviewKey, number, opinionId)),
         register("refresh", () => review.select(review.repository, review.target, review.source)),
         register("openFile", fileId => review.openFile(fileId)),
         register("openWorkingFile", node => review.openWorkingFile(node)),

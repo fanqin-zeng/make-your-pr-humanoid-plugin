@@ -2,7 +2,7 @@
   "name": "workspace-pr-review",
   "displayName": "Make Your PR Humanoid",
   "description": "在 Qoder 或 VS Code 中评阅 Git 分支、记录行意见并导出评阅任务。",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "publisher": "workspace-tools",
   "repository": {
     "type": "git",
@@ -89,6 +89,12 @@
         "category": "评阅"
       },
       {
+        "command": "workspacePrReview.expandAllOpinions",
+        "title": "展开全部评论",
+        "category": "评阅",
+        "icon": "$(expand-all)"
+      },
+      {
         "command": "workspacePrReview.refresh",
         "title": "刷新比较",
         "category": "评阅",
@@ -162,6 +168,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "workspacePrReview.expandAllOpinions",
+          "when": "view == workspacePrReview.allOpinions",
+          "group": "navigation@1"
+        },
+        {
           "command": "workspacePrReview.expandFolders",
           "when": "view == workspacePrReview.files && !workspacePrReview.flatFiles",
           "group": "navigation@1"
@@ -190,6 +201,10 @@
       "commandPalette": [
         {
           "command": "workspacePrReview.revealOpinion",
+          "when": "false"
+        },
+        {
+          "command": "workspacePrReview.expandAllOpinions",
           "when": "false"
         },
         {
