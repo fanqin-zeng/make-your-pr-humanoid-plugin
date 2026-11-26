@@ -174,16 +174,24 @@ async function refresh(repository, target, source, stored) {
     const range = await currentRange(repository, target, source, stored);
     const { base, headTree, sourceCommit, targetCommit } = range;
     const previous = stored.versions.at(-1);
-    if (previous && previous.range.base === range.base && previous.range.headTree === headTree) {
-        previous.range.sourceCommit = sourceCommit;
-        previous.range.targetCommit = targetCommit;
-        previous.range.working = range.working;
+    const sameCommits = previous && previous.range.sourceCommit === sourceCommit && previous.range.targetCommit === targetCommit;
+    if (sameCommits && previous.range.base === base && previous.range.headTree === headTree) {
+        previous.range = range;
         return { version: previous, snapshot: await load(repository, target, source, previous) };
     }
 
     const snapshot = await comparison(repository, target, source, range);
     const annotations = previous ? await carry(repository, await load(repository, target, source, previous), snapshot, previous)
         : { read: {}, clarifications: {}, summaries: {}, opinions: [], extraFiles: [] };
+    if (sameCommits) {
+        const carried = new Map(annotations.opinions.map(note => [note.id, note]));
+        await pin(repository, range);
+        previous.range = range;
+        // Keep unmatched opinions at their original anchors until this numbered version becomes historical.
+        previous.opinions = previous.opinions.map(note => carried.get(note.id) || note);
+        previous.extraFiles = annotations.extraFiles;
+        return { version: previous, snapshot };
+    }
     const restored = stored.versions.slice(0, -1).reverse().find(item =>
         item.range.base === base && item.range.headTree === headTree);
     if (restored) {

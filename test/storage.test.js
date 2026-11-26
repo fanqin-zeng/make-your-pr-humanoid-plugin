@@ -98,7 +98,7 @@ test("retries a stale write and keeps both IDEs' updates", async t => {
     }
 });
 
-test("shares snapshots from Git metadata even with a long checkout path", async t => {
+test("shares working-tree refreshes without advancing the version until a commit changes", async t => {
     const { root: workspace, open } = setup(t);
     const root = path.join(workspace, "workspace-with-a-long-folder-name", "review-repository");
     fs.mkdirSync(root, { recursive: true });
@@ -114,7 +114,7 @@ test("shares snapshots from Git metadata even with a long checkout path", async 
     await git(root, ["add", "train.py"]);
     await git(root, ["commit", "-m", "baseline"]);
     await git(root, ["checkout", "-b", "feature"]);
-    fs.writeFileSync(file, "baseline\nfeature\n");
+    fs.writeFileSync(file, "baseline\nfeature\nreviewed line\n");
     await git(root, ["add", "train.py"]);
     await git(root, ["commit", "-m", "feature"]);
     const target = "refs/heads/main";
@@ -125,19 +125,47 @@ test("shares snapshots from Git metadata even with a long checkout path", async 
         const { version, snapshot } = await versions.refresh(root, target, source, data);
         version.opinions.push({ id: "qoder", revision: "r1", path: "train.py", fileId: snapshot.files[0].id,
             side: "new", start: 2, end: 2, digest: snapshot.files[0].digest, text: "review note", replies: [] });
+        version.opinions.push({ ...version.opinions[0], id: "second", start: 3, end: 3, excerpt: "reviewed line",
+            replies: [{ requestId: "job", revision: "r1", text: "reply" }] });
         return { data };
     });
-    assert.equal(code.read(key).data.versions[0].opinions[0].text, "review note");
+    const initial = code.read(key).data.versions[0];
+    assert.equal(initial.opinions[0].text, "review note");
+    const refresh = store => store.change(key, async data => ({ data, result: await versions.refresh(root, target, source, data) }));
     fs.appendFileSync(file, "local edit\n");
-    await code.change(key, async data => ({ data, result: await versions.refresh(root, target, source, data) }));
+    const working = await refresh(code);
+    assert.deepEqual(working.data.versions.map(item => item.number), ["v0001"]);
+    assert.equal(working.result.version.opinions[0].digest, working.result.snapshot.files[0].digest);
+    assert.equal(working.result.snapshot.working, true);
+    assert.notEqual(working.result.snapshot.head, initial.range.head);
+    assert.match(await git(root, ["status", "--porcelain", "-uall"]), /^ M train\.py\r?\n$/);
+
+    fs.writeFileSync(file, "baseline\nfeature\nreplaced line\nlocal edit\n");
+    await git(root, ["add", "train.py"]);
+    const staged = await refresh(qoder);
+    assert.deepEqual(staged.data.versions.map(item => item.number), ["v0001"]);
+    assert.notEqual(staged.result.version.opinions[1].digest, staged.result.snapshot.files[0].digest);
+    assert.equal(staged.result.version.opinions[1].excerpt, "reviewed line");
+
+    await git(root, ["commit", "-m", "commit the reviewed working tree"]);
+    const committed = await refresh(code);
     const history = qoder.read(key).data.versions;
     assert.deepEqual(history.map(item => item.number), ["v0001", "v0002"]);
-    assert.equal(history[1].opinions[0].text, "review note");
-    assert.equal(history[1].range.working, true);
-    assert.match(await git(root, ["status", "--porcelain", "-uall"]), /^ M train\.py\r?\n$/);
+    assert.equal(history[0].opinions[1].replies[0].text, "reply");
+    assert.equal(history[1].range.head, history[0].range.head);
+    assert.notEqual(history[1].range.sourceCommit, history[0].range.sourceCommit);
+    assert.equal(committed.result.snapshot.working, false);
+    assert.deepEqual(history[1].opinions.map(note => note.id), ["qoder"]);
     const { base, head } = history[1].range;
     for (const commit of [base, head]) {
         const pin = await git(root, ["rev-parse", "refs/workspace-pr-review/objects/" + commit]);
         assert.equal(pin.trim(), commit);
     }
+    const targetOnly = (await git(root, ["commit-tree", base + "^{tree}", "-p", base, "-m", "advance target"])).trim();
+    await git(root, ["update-ref", target, targetOnly]);
+    const advanced = await refresh(qoder);
+    assert.deepEqual(advanced.data.versions.map(item => item.number), ["v0001", "v0002", "v0003"]);
+    assert.equal(advanced.result.snapshot.base, base);
+    assert.equal(advanced.result.snapshot.head, head);
+    assert.equal(advanced.result.snapshot.targetCommit, targetOnly);
 });

@@ -45,7 +45,7 @@ function thread(opinion, current) {
     else header.append(element("span", (current ? "" : opinion.path + " · ") +
         lineLabel(opinion.side, opinion.start, opinion.end), "meta"));
     if (opinion.stale) header.append(element("span", "历史快照", "meta"));
-    if (opinion.pending) header.append(element("span", state.updating ? "等待本轮回复" : "待 Agent 回复", "meta"));
+    if (opinion.pending && !opinion.stale) header.append(element("span", state.updating ? "等待本轮回复" : "待 Agent 回复", "meta"));
     if (!state.historical) {
         const edit = element("button", "编辑", "link");
         edit.type = "button";
@@ -58,6 +58,13 @@ function thread(opinion, current) {
         header.append(edit);
     }
     card.append(header, element("p", opinion.text));
+    if (opinion.stale && opinion.excerpt) {
+        const excerpt = element("details");
+        const content = element("p");
+        content.append(element("code", opinion.excerpt));
+        excerpt.append(element("summary", "原评阅摘录"), content);
+        card.append(excerpt);
+    }
     for (const reply of opinion.replies) {
         const response = element("div", undefined, "reply");
         const time = new Date(reply.at).toLocaleString();

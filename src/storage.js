@@ -32,7 +32,7 @@ async function reviewDatabase(repository) {
 }
 
 function snapshotKey(range) {
-    return [range.base, range.headTree || range.head].join("\0");
+    return [range.targetCommit, range.sourceCommit, range.base, range.headTree || range.head].join("\0");
 }
 
 function hasReviewContent(version) {

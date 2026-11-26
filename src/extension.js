@@ -730,12 +730,14 @@ class Review {
         try {
             if (sourceCommit !== await git.resolve(repository, source)) throw new Error("来源分支已前进，请先刷新比较。");
             const latest = await versions.currentRange(repository, target, source, this.data);
-            if (latest.head !== head || latest.base !== base || latest.sourceCommit !== sourceCommit) {
+            if (latest.head !== head || latest.base !== base || latest.sourceCommit !== sourceCommit
+                || latest.targetCommit !== targetCommit) {
                 throw new Error("分支或工作树内容已变化，请先刷新比较。");
             }
             if (actions.edit) await changes.assertHead(repository, source, sourceCommit);
             const pushDestination = actions.push ? await changes.pushDestination(repository, source) : null;
-            const pendingOpinions = clarificationOnly ? [] : this.record.opinions.filter(note => this.needsReply(note, actions.edit));
+            const pendingOpinions = clarificationOnly ? [] : this.record.opinions.filter(note =>
+                this.fileFor(note)?.digest === note.digest && this.needsReply(note, actions.edit));
             const opinions = pendingOpinions.map(note => {
                 const { id, revision, path, side, start, end, text, excerpt } = note;
                 const file = this.fileFor(note);
@@ -802,8 +804,11 @@ class Review {
                 if (data.receipts?.[request.requestId]) return { data };
                 const matches = version => version.range.base === request.base
                     && (version.range.headTree || version.range.head) === request.sourceTree;
+                const sameCommits = version => version.range.base === request.base
+                    && version.range.targetCommit === request.targetCommit && version.range.sourceCommit === request.sourceHead;
                 const versionsForRequest = data.versions || [];
-                const initial = versionsForRequest.find(item => item.number === request.version && matches(item))
+                const initial = versionsForRequest.find(item => item.number === request.version && (sameCommits(item) || matches(item)))
+                    || versionsForRequest.findLast(item => sameCommits(item) && matches(item))
                     || versionsForRequest.findLast(matches);
                 if (!initial) throw new Error("找不到导出时的评阅版本。");
                 const head = await git.resolve(repository, source);
